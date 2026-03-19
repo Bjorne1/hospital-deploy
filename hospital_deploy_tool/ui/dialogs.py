@@ -284,7 +284,20 @@ class LogViewerDialog(QDialog):
             self._fetch_current()
 
     def _has_paths(self) -> bool:
-        return bool(self.profile.log_path_default or self.profile.log_path_error)
+        return bool(self._effective_path(self._TAB_DEFAULT) or self._effective_path(self._TAB_ERROR))
+
+    def _effective_path(self, tab: int) -> str:
+        """返回已配置路径；未配置时从 target_path 推导默认值。"""
+        if tab == self._TAB_DEFAULT:
+            if self.profile.log_path_default:
+                return self.profile.log_path_default
+            base = self.profile.target_path.rstrip("/")
+            return f"{base}/logs/default.log" if base else ""
+        else:
+            if self.profile.log_path_error:
+                return self.profile.log_path_error
+            base = self.profile.target_path.rstrip("/")
+            return f"{base}/logs/error.log" if base else ""
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -338,9 +351,7 @@ class LogViewerDialog(QDialog):
         self._fetch_current()
 
     def _current_path(self) -> str:
-        if self._current_tab == self._TAB_DEFAULT:
-            return self.profile.log_path_default
-        return self.profile.log_path_error
+        return self._effective_path(self._current_tab)
 
     def _fetch_current(self) -> None:
         path = self._current_path()
@@ -373,8 +384,8 @@ class LogViewerDialog(QDialog):
 
     def _open_config(self) -> None:
         dlg = _LogPathConfigDialog(
-            self.profile.log_path_default,
-            self.profile.log_path_error,
+            self.profile.log_path_default or self._effective_path(self._TAB_DEFAULT),
+            self.profile.log_path_error or self._effective_path(self._TAB_ERROR),
             self,
         )
         if dlg.exec_() == QDialog.Accepted:
