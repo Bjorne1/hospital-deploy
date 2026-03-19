@@ -1,6 +1,11 @@
 import os
 import sys
 
+# 确保无论从哪里启动，都能找到 hospital_deploy_tool 包
+_here = os.path.dirname(os.path.abspath(__file__))
+if _here not in sys.path:
+    sys.path.insert(0, _here)
+
 # 单文件打包模式下，PySide2 DLL 解压在临时目录中，
 # 部分电脑缺少 VC++ Runtime 或 DLL 搜索路径不完整会导致 ImportError。
 # 必须在导入 PySide2 之前将解压目录加入 DLL 搜索路径。
