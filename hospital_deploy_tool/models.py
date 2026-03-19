@@ -39,6 +39,8 @@ class DeploymentProfile:
     max_backup_count: int = DEFAULT_MAX_BACKUPS
     backup_root: str = DEFAULT_BACKUP_ROOT
     compress_upload: bool = False
+    log_path_default: str = ""
+    log_path_error: str = ""
 
     @property
     def is_archive(self) -> bool:

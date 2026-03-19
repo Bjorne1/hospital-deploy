@@ -364,6 +364,12 @@ class RemoteDeployer:
         )
         return resolved.deploy_path
 
+    def read_remote_log(self, path: str, lines: int = 500) -> str:
+        result = self.run_command(f"tail -n {lines} {shlex.quote(path)}", check=False)
+        if result.exit_code != 0:
+            raise RuntimeError(result.stderr.strip() or f"无法读取日志: {path}")
+        return result.stdout
+
     def run_command(self, command: str, check: bool = True) -> CommandResult:
         stdin, stdout, stderr = self.client.exec_command(command)
         stdin.close()

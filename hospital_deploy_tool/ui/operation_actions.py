@@ -16,7 +16,7 @@ from ..constants import (
 )
 from ..models import BackupRecord, DeploymentProfile, HistoryRecord
 from ..workers import OperationWorker
-from .dialogs import BackupDialog, HistoryDialog
+from .dialogs import BackupDialog, HistoryDialog, LogViewerDialog
 
 
 class OperationActions:
@@ -149,6 +149,7 @@ class OperationActions:
             self.deploy_button,
             self.upload_button,
             self.commands_button,
+            self.log_button,
             self.save_button,
             self.new_button,
             self.rename_button,
@@ -167,6 +168,18 @@ class OperationActions:
 
     def open_history_dialog(self) -> None:
         HistoryDialog(self.state.history, self).exec()
+
+    def open_log_viewer(self) -> None:
+        profile = self.current_profile()
+        dlg = LogViewerDialog(profile, self)
+        dlg.config_saved.connect(self.on_log_config_saved)
+        dlg.exec_()
+
+    def on_log_config_saved(self, default_path: str, error_path: str) -> None:
+        profile = self.current_profile()
+        profile.log_path_default = default_path
+        profile.log_path_error = error_path
+        self.storage.upsert_profile(self.state, profile)
 
     def restore_backup(self, backup_id: str) -> None:
         record = next((item for item in self.state.backups if item.id == backup_id), None)

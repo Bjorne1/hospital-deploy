@@ -227,11 +227,13 @@ class MainWindow(ProfileActions, OperationActions, QMainWindow):
             lambda: self.start_operation(ACTION_COMMANDS_ONLY),
             "muted",
         )
+        self.log_button = self.button("查看日志", self.open_log_viewer, "muted")
         layout.addWidget(self.summary_label, 1)
         row = QHBoxLayout()
         row.addWidget(self.deploy_button)
         row.addWidget(self.upload_button)
         row.addWidget(self.commands_button)
+        row.addWidget(self.log_button)
         layout.addLayout(row)
         return group
 

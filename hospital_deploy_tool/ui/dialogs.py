@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-from PySide2.QtCore import Qt, Signal
+from datetime import datetime
+
+from PySide2.QtCore import Qt, QThread, Signal
+from PySide2.QtGui import QFont, QTextCursor
 from PySide2.QtWidgets import (
     QDialog,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QPlainTextEdit,
     QTableWidget,
@@ -13,7 +18,7 @@ from PySide2.QtWidgets import (
     QWidget,
 )
 
-from ..models import BackupRecord, HistoryRecord
+from ..models import BackupRecord, DeploymentProfile, HistoryRecord
 
 
 class BackupDialog(QDialog):
@@ -233,3 +238,177 @@ class HistoryDialog(QDialog):
             f"摘要: {record.summary}",
         ]
         self.details.setPlainText("\n".join(lines))
+
+
+class LogFetchWorker(QThread):
+    finished = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, profile: DeploymentProfile, path: str) -> None:
+        super().__init__()
+        self.profile = profile
+        self.path = path
+
+    def run(self) -> None:
+        try:
+            from ..remote import RemoteDeployer
+
+            class _NullLogger:
+                def info(self, *_): pass
+                def warning(self, *_): pass
+                def error(self, *_): pass
+                def success(self, *_): pass
+
+            with RemoteDeployer(self.profile, _NullLogger()) as deployer:
+                text = deployer.read_remote_log(self.path)
+            self.finished.emit(text)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+
+
+class LogViewerDialog(QDialog):
+    config_saved = Signal(str, str)
+
+    _TAB_DEFAULT = 0
+    _TAB_ERROR = 1
+
+    def __init__(self, profile: DeploymentProfile, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.profile = profile
+        self._worker: LogFetchWorker | None = None
+        self._current_tab = self._TAB_DEFAULT
+        self.setWindowTitle(f"查看日志 — {profile.name} @ {profile.host}")
+        self.resize(980, 600)
+        self._build_ui()
+        if self._has_paths():
+            self._fetch_current()
+
+    def _has_paths(self) -> bool:
+        return bool(self.profile.log_path_default or self.profile.log_path_error)
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+
+        top_bar = QHBoxLayout()
+        self._config_button = QPushButton("配置路径", self)
+        self._config_button.setProperty("role", "muted")
+        self._config_button.clicked.connect(self._open_config)
+        top_bar.addStretch(1)
+        top_bar.addWidget(self._config_button)
+        layout.addLayout(top_bar)
+
+        tab_bar = QHBoxLayout()
+        self._tab_default = QPushButton("default.log", self)
+        self._tab_default.setCheckable(True)
+        self._tab_default.setChecked(True)
+        self._tab_default.clicked.connect(lambda: self._switch_tab(self._TAB_DEFAULT))
+        self._tab_error = QPushButton("error.log", self)
+        self._tab_error.setCheckable(True)
+        self._tab_error.clicked.connect(lambda: self._switch_tab(self._TAB_ERROR))
+        self._refresh_button = QPushButton("刷新", self)
+        self._refresh_button.setProperty("role", "secondary")
+        self._refresh_button.clicked.connect(self._fetch_current)
+        self._close_button = QPushButton("关闭", self)
+        self._close_button.clicked.connect(self.accept)
+        tab_bar.addWidget(self._tab_default)
+        tab_bar.addWidget(self._tab_error)
+        tab_bar.addStretch(1)
+        tab_bar.addWidget(self._refresh_button)
+        tab_bar.addWidget(self._close_button)
+        layout.addLayout(tab_bar)
+
+        self._log_area = QPlainTextEdit(self)
+        self._log_area.setReadOnly(True)
+        font = QFont("Consolas", 11)
+        font.setStyleHint(QFont.Monospace)
+        self._log_area.setFont(font)
+        layout.addWidget(self._log_area, 1)
+
+        self._status_label = QLabel("就绪", self)
+        self._status_label.setProperty("role", "muted")
+        layout.addWidget(self._status_label)
+
+        if not self._has_paths():
+            self._log_area.setPlainText("请先点击右上角「配置路径」")
+
+    def _switch_tab(self, tab: int) -> None:
+        self._current_tab = tab
+        self._tab_default.setChecked(tab == self._TAB_DEFAULT)
+        self._tab_error.setChecked(tab == self._TAB_ERROR)
+        self._fetch_current()
+
+    def _current_path(self) -> str:
+        if self._current_tab == self._TAB_DEFAULT:
+            return self.profile.log_path_default
+        return self.profile.log_path_error
+
+    def _fetch_current(self) -> None:
+        path = self._current_path()
+        if not path:
+            self._log_area.setPlainText("请先点击右上角「配置路径」")
+            return
+        if self._worker and self._worker.isRunning():
+            return
+        self._status_label.setText("加载中...")
+        self._refresh_button.setEnabled(False)
+        self._worker = LogFetchWorker(self.profile, path)
+        self._worker.finished.connect(self._on_fetch_done)
+        self._worker.failed.connect(self._on_fetch_failed)
+        self._worker.start()
+
+    def _on_fetch_done(self, text: str) -> None:
+        self._log_area.setPlainText(text)
+        cursor = self._log_area.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self._log_area.setTextCursor(cursor)
+        line_count = text.count("\n") + 1 if text.strip() else 0
+        now = datetime.now().strftime("%H:%M:%S")
+        self._status_label.setText(f"已加载 {line_count} 行  最后更新：{now}")
+        self._refresh_button.setEnabled(True)
+
+    def _on_fetch_failed(self, error: str) -> None:
+        self._log_area.setPlainText(f"[错误] {error}")
+        self._status_label.setText("加载失败")
+        self._refresh_button.setEnabled(True)
+
+    def _open_config(self) -> None:
+        dlg = _LogPathConfigDialog(
+            self.profile.log_path_default,
+            self.profile.log_path_error,
+            self,
+        )
+        if dlg.exec_() == QDialog.Accepted:
+            default_path, error_path = dlg.get_paths()
+            self.profile.log_path_default = default_path
+            self.profile.log_path_error = error_path
+            self.config_saved.emit(default_path, error_path)
+            self._fetch_current()
+
+
+class _LogPathConfigDialog(QDialog):
+    def __init__(self, default_path: str, error_path: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("配置日志路径")
+        self.setFixedWidth(420)
+        form = QFormLayout(self)
+        self._default_edit = QLineEdit(default_path, self)
+        self._error_edit = QLineEdit(error_path, self)
+        form.addRow("正常日志", self._default_edit)
+        form.addRow("异常日志", self._error_edit)
+        buttons = QHBoxLayout()
+        cancel = QPushButton("取消", self)
+        cancel.clicked.connect(self.reject)
+        save = QPushButton("保存", self)
+        save.clicked.connect(self.accept)
+        buttons.addStretch(1)
+        buttons.addWidget(cancel)
+        buttons.addWidget(save)
+        form.addRow("", self._wrap(buttons))
+
+    def _wrap(self, layout: QHBoxLayout) -> QWidget:
+        w = QWidget(self)
+        w.setLayout(layout)
+        return w
+
+    def get_paths(self) -> tuple[str, str]:
+        return self._default_edit.text().strip(), self._error_edit.text().strip()

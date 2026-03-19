@@ -58,6 +58,7 @@ class ProfileActions:
             profile_name = self.current_profile().name
         else:
             profile_name = "新配置"
+        existing = self.find_profile(profile_id or self.active_profile_id)
         return DeploymentProfile(
             id=profile_id or self.active_profile_id or DeploymentProfile().id,
             name=profile_name,
@@ -72,6 +73,8 @@ class ProfileActions:
             max_backup_count=self.max_backup_spin.value(),
             backup_root=self.backup_root_edit.text().strip(),
             compress_upload=self.compress_check.isChecked(),
+            log_path_default=existing.log_path_default if existing else "",
+            log_path_error=existing.log_path_error if existing else "",
         )
 
     def current_profile(self) -> DeploymentProfile:
