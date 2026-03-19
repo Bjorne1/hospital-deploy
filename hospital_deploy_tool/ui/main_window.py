@@ -133,29 +133,59 @@ class MainWindow(ProfileActions, OperationActions, QMainWindow):
 
     def source_group(self) -> QGroupBox:
         group = QGroupBox("源配置", self)
-        form = QFormLayout(group)
+        vbox = QVBoxLayout(group)
+
         self.source_type_combo = QComboBox(self)
         self.source_type_combo.addItem("文件", SOURCE_TYPE_FILE)
         self.source_type_combo.addItem("目录", SOURCE_TYPE_DIRECTORY)
         self.source_type_combo.addItem("压缩文件", SOURCE_TYPE_ARCHIVE)
         self.source_type_combo.currentIndexChanged.connect(self.on_source_type_changed)
+
         self.compress_check = QCheckBox("压缩上传（本地打包 tar.gz → 传输 → 远端解压）", self)
         self.compress_check.setVisible(False)
         self.compress_check.toggled.connect(self.update_summary)
+
         self.source_path_edit = QLineEdit(self)
         self.source_path_edit.textChanged.connect(self.update_summary)
+
         self.source_hint = QLabel("请选择当前会话能直接访问的源路径。", self)
         self.source_hint.setProperty("role", "muted")
+
         browse = self.button("浏览", self.browse_source, "secondary")
         detect = self.button("检测可访问性", self.detect_source_access, "secondary")
-        row = QHBoxLayout()
-        row.addWidget(self.source_path_edit, 1)
-        row.addWidget(browse)
-        row.addWidget(detect)
-        form.addRow("源类型", self.source_type_combo)
-        form.addRow("", self.compress_check)
-        form.addRow("源路径", self.wrap(row))
-        form.addRow("", self.source_hint)
+
+        # 左右布局：源类型占 1/5，源路径+按钮占 4/5
+        main_row = QHBoxLayout()
+        main_row.setSpacing(8)
+
+        type_widget = QWidget(self)
+        type_layout = QVBoxLayout(type_widget)
+        type_layout.setContentsMargins(0, 0, 0, 0)
+        type_layout.setSpacing(2)
+        type_label = QLabel("源类型", self)
+        type_layout.addWidget(type_label)
+        type_layout.addWidget(self.source_type_combo)
+        type_layout.addStretch()
+
+        path_widget = QWidget(self)
+        path_layout = QVBoxLayout(path_widget)
+        path_layout.setContentsMargins(0, 0, 0, 0)
+        path_layout.setSpacing(2)
+        path_label = QLabel("源路径", self)
+        path_row = QHBoxLayout()
+        path_row.setSpacing(4)
+        path_row.addWidget(self.source_path_edit, 1)
+        path_row.addWidget(browse)
+        path_row.addWidget(detect)
+        path_layout.addWidget(path_label)
+        path_layout.addLayout(path_row)
+        path_layout.addWidget(self.compress_check)
+        path_layout.addWidget(self.source_hint)
+
+        main_row.addWidget(type_widget, 1)   # 1/5
+        main_row.addWidget(path_widget, 4)   # 4/5
+
+        vbox.addLayout(main_row)
         return group
 
     def linux_group(self) -> QGroupBox:
