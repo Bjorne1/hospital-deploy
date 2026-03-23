@@ -12,11 +12,27 @@ from ..constants import (
     ACTION_RESTORE_BACKUP,
     ACTION_TEST_CONNECTION,
     ACTION_UPLOAD_ONLY,
+    SOURCE_TYPE_FILE,
     get_logs_dir,
 )
 from ..models import BackupRecord, DeploymentProfile, HistoryRecord
+from ..remote import RemoteDeployer
 from ..workers import OperationWorker
 from .dialogs import BackupDialog, HistoryDialog, LogViewerDialog
+
+
+class _SilentLogger:
+    def info(self, *_args) -> None:
+        return None
+
+    def warning(self, *_args) -> None:
+        return None
+
+    def error(self, *_args) -> None:
+        return None
+
+    def success(self, *_args) -> None:
+        return None
 
 
 class OperationActions:
@@ -30,14 +46,20 @@ class OperationActions:
         action: str,
         profile: DeploymentProfile | None = None,
         backup_record: BackupRecord | None = None,
+        run_post_commands_after_restore: bool = False,
     ) -> None:
         if self.thread is not None:
             QMessageBox.warning(self, "操作进行中", "当前已有任务在执行，请等待完成。")
             return
         current = profile or self.persist_form_profile()
-        if action != ACTION_TEST_CONNECTION and not self.confirm_action(action, current, backup_record):
+        if action != ACTION_TEST_CONNECTION and not self.confirm_action(
+            action,
+            current,
+            backup_record,
+            run_post_commands_after_restore,
+        ):
             return
-        self.start_worker(action, current, backup_record)
+        self.start_worker(action, current, backup_record, run_post_commands_after_restore)
 
     def persist_form_profile(self) -> DeploymentProfile:
         profile = self.snapshot_profile()
@@ -51,6 +73,7 @@ class OperationActions:
         action: str,
         profile: DeploymentProfile,
         backup_record: BackupRecord | None,
+        run_post_commands_after_restore: bool,
     ) -> bool:
         titles = {
             ACTION_DEPLOY: "开始部署",
@@ -60,7 +83,9 @@ class OperationActions:
         }
         summary = self.summary_text(profile)
         if backup_record:
-            summary += f"\n恢复备份: {backup_record.remote_backup_path}"
+            summary += f"\n恢复备份: {backup_record.name} ({backup_record.remote_backup_path})"
+        if action == ACTION_RESTORE_BACKUP:
+            summary += f"\n恢复后执行后置命令: {'是' if run_post_commands_after_restore else '否'}"
         buttons = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         answer = QMessageBox.question(self, titles[action], summary, buttons)
         return answer == QMessageBox.StandardButton.Yes
@@ -70,6 +95,7 @@ class OperationActions:
         action: str,
         profile: DeploymentProfile,
         backup_record: BackupRecord | None = None,
+        run_post_commands_after_restore: bool = False,
     ) -> None:
         self.set_busy(True)
         self.clear_log()
@@ -82,7 +108,13 @@ class OperationActions:
         self.current_log_file = str(log_path)
         self.running_profile_id = profile.id
         self.thread = QThread(self)
-        self.worker = OperationWorker(action, profile, log_path, backup_record)
+        self.worker = OperationWorker(
+            action,
+            profile,
+            log_path,
+            backup_record,
+            run_post_commands_after_restore=run_post_commands_after_restore,
+        )
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.log_emitted.connect(self.append_log)
@@ -161,9 +193,26 @@ class OperationActions:
             button.setEnabled(not busy)
 
     def open_backup_dialog(self) -> None:
-        dialog = BackupDialog(self.state.backups, self)
-        dialog.restore_requested.connect(self.restore_backup)
-        dialog.delete_requested.connect(lambda backup_id: self.on_backup_deleted(dialog, backup_id))
+        profile = self.persist_form_profile()
+        try:
+            backups = self.load_remote_backups(profile)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "备份管理", str(exc))
+            return
+        dialog = BackupDialog(backups, self)
+        dialog.refresh_requested.connect(lambda: self.refresh_backup_dialog(dialog, profile))
+        dialog.restore_requested.connect(
+            lambda backup_id, run_commands: self.restore_backup(
+                dialog,
+                profile,
+                backup_id,
+                run_commands,
+            )
+        )
+        dialog.delete_requested.connect(lambda backup_id: self.on_backup_deleted(dialog, profile, backup_id))
+        dialog.metadata_save_requested.connect(
+            lambda record: self.on_backup_metadata_saved(dialog, profile, record)
+        )
         dialog.exec()
 
     def open_history_dialog(self) -> None:
@@ -181,21 +230,99 @@ class OperationActions:
         profile.log_path_error = error_path
         self.storage.upsert_profile(self.state, profile)
 
-    def restore_backup(self, backup_id: str) -> None:
-        record = next((item for item in self.state.backups if item.id == backup_id), None)
-        profile = self.find_profile(record.profile_id) if record else None
-        if record is None or profile is None:
-            QMessageBox.critical(self, "恢复失败", "未找到对应 Profile，无法使用保存的连接信息恢复。")
+    def restore_backup(
+        self,
+        dialog: BackupDialog,
+        profile: DeploymentProfile,
+        backup_id: str,
+        run_post_commands_after_restore: bool,
+    ) -> None:
+        record = next((item for item in dialog.backups if item.id == backup_id), None)
+        if record is None:
+            QMessageBox.critical(self, "恢复失败", "未找到选中的备份记录。")
             return
-        self.start_operation(ACTION_RESTORE_BACKUP, profile=profile, backup_record=record)
+        self.start_operation(
+            ACTION_RESTORE_BACKUP,
+            profile=profile,
+            backup_record=record,
+            run_post_commands_after_restore=run_post_commands_after_restore,
+        )
 
-    def delete_backup_record(self, backup_id: str) -> None:
-        self.storage.remove_backup(self.state, backup_id)
-        self.statusBar().showMessage("备份记录已删除")
+    def on_backup_deleted(
+        self,
+        dialog: BackupDialog,
+        profile: DeploymentProfile,
+        backup_id: str,
+    ) -> None:
+        record = next((item for item in dialog.backups if item.id == backup_id), None)
+        if record is None:
+            QMessageBox.warning(self, "删除失败", "未找到选中的备份记录。")
+            return
+        answer = QMessageBox.question(
+            self,
+            "删除备份",
+            f"确认删除备份“{record.name}”吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            with RemoteDeployer(profile, _SilentLogger()) as deployer:
+                deployer.delete_backup(record)
+            self.state.backups = [item for item in dialog.backups if item.id != backup_id]
+            dialog.load_rows(self.state.backups)
+            self.statusBar().showMessage("备份记录已删除")
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "删除备份", str(exc))
 
-    def on_backup_deleted(self, dialog: BackupDialog, backup_id: str) -> None:
-        self.delete_backup_record(backup_id)
-        dialog.load_rows(self.state.backups)
+    def on_backup_metadata_saved(
+        self,
+        dialog: BackupDialog,
+        profile: DeploymentProfile,
+        record: BackupRecord,
+    ) -> None:
+        if not record.name.strip():
+            QMessageBox.warning(self, "保存失败", "备份名称不能为空。")
+            return
+        try:
+            with RemoteDeployer(profile, _SilentLogger()) as deployer:
+                deployer.save_backup_record(record)
+            self.state.backups = [
+                record if item.id == record.id else item
+                for item in dialog.backups
+            ]
+            dialog.load_rows(self.state.backups, selected_backup_id=record.id)
+            self.statusBar().showMessage("备份信息已保存")
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "保存备份信息", str(exc))
+
+    def refresh_backup_dialog(self, dialog: BackupDialog, profile: DeploymentProfile) -> None:
+        selected_backup_id = dialog.selected_backup_id()
+        try:
+            backups = self.load_remote_backups(profile)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "刷新备份", str(exc))
+            return
+        dialog.load_rows(backups, selected_backup_id=selected_backup_id)
+
+    def load_remote_backups(self, profile: DeploymentProfile) -> list[BackupRecord]:
+        self.validate_backup_browser_profile(profile)
+        with RemoteDeployer(profile, _SilentLogger()) as deployer:
+            backups = deployer.list_backups()
+        self.state.backups = backups
+        return backups
+
+    def validate_backup_browser_profile(self, profile: DeploymentProfile) -> None:
+        if not profile.host.strip():
+            raise ValueError("请先填写 Linux 主机 IP，再打开备份管理。")
+        if not profile.username.strip():
+            raise ValueError("请先填写 Linux 用户名，再打开备份管理。")
+        if not profile.password:
+            raise ValueError("请先填写 Linux 密码，再打开备份管理。")
+        if not profile.target_path.strip():
+            raise ValueError("请先填写 Linux 目标路径，再打开备份管理。")
+        if profile.source_type == SOURCE_TYPE_FILE and not profile.source_path.strip():
+            raise ValueError("文件模式下请先填写源文件路径，再打开备份管理。")
 
     def remove_deleted_backups(self, deleted_backups: list[BackupRecord]) -> None:
         if not deleted_backups:

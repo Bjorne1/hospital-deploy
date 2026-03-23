@@ -29,16 +29,15 @@ class Storage:
             return AppState()
         payload = json.loads(self.config_path.read_text(encoding="utf-8"))
         profiles = [DeploymentProfile.from_dict(row) for row in payload.get("profiles", [])]
-        backups = [BackupRecord.from_dict(row) for row in payload.get("backups", [])]
         history = [HistoryRecord.from_dict(row) for row in payload.get("history", [])]
-        return AppState(profiles=profiles, backups=backups, history=history)
+        return AppState(profiles=profiles, backups=[], history=history)
 
     def save(self, state: AppState) -> None:
         self.ensure_dirs()
         payload = {
             "version": CONFIG_VERSION,
             "profiles": [profile.to_dict() for profile in state.profiles],
-            "backups": [record.to_dict() for record in state.backups],
+            "backups": [],
             "history": [record.to_dict() for record in state.history],
         }
         self.config_path.write_text(

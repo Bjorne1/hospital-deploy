@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import posixpath
 import shlex
@@ -15,10 +17,11 @@ import paramiko
 from .constants import (
     ACTION_COMMANDS_ONLY,
     ACTION_UPLOAD_ONLY,
+    DEFAULT_BACKUP_ROOT,
     SOURCE_TYPE_ARCHIVE,
     SOURCE_TYPE_DIRECTORY,
 )
-from .models import BackupRecord, DeploymentProfile
+from .models import BackupRecord, DeploymentProfile, default_backup_name
 from .targeting import resolve_file_target
 
 
@@ -93,12 +96,14 @@ class RemoteDeployer:
             deployed_target_path=self.deployed_target_path(),
         )
 
-    def restore_backup(self, record: BackupRecord) -> None:
+    def restore_backup(self, record: BackupRecord, run_post_commands: bool = False) -> None:
         self.logger.info(f"恢复备份: {record.remote_backup_path}")
         if record.source_type in {SOURCE_TYPE_DIRECTORY, SOURCE_TYPE_ARCHIVE}:
             self.restore_directory(record.remote_backup_path, record.target_path)
         else:
             self.restore_file(record.remote_backup_path, record.target_path)
+        if run_post_commands:
+            self.run_post_commands()
         self.logger.success("备份恢复完成")
 
     def prepare_backup(self) -> BackupRecord | None:
@@ -126,13 +131,15 @@ class RemoteDeployer:
             return None
         if not self.is_file(target):
             raise RuntimeError("目标路径已存在，但不是文件，无法按文件模式覆盖")
-        backup_dir = self.profile_backup_dir()
+        backup_dir = self.backup_payload_dir()
         backup_path = posixpath.join(backup_dir, self.file_backup_name(target))
-        self.ensure_dir(backup_dir)
+        self.ensure_backup_dirs()
         self.run_command(f"cp -a {shlex.quote(target)} {shlex.quote(backup_path)}")
         size = self.remote_size(backup_path)
         self.logger.success(f"文件备份完成: {backup_path}")
-        return self.make_backup_record(backup_path, "file", target, size)
+        record = self.make_backup_record(backup_path, "file", target, size)
+        self.save_backup_record(record)
+        return record
 
     def backup_directory(self) -> BackupRecord | None:
         if not self.path_exists(self.profile.target_path):
@@ -140,16 +147,18 @@ class RemoteDeployer:
             return None
         if not self.is_dir(self.profile.target_path):
             raise RuntimeError("目标路径已存在，但不是目录，无法按目录模式部署")
-        backup_dir = self.profile_backup_dir()
+        backup_dir = self.backup_payload_dir()
         backup_path = posixpath.join(backup_dir, self.dir_backup_name())
         parent = posixpath.dirname(self.profile.target_path.rstrip("/")) or "/"
         name = posixpath.basename(self.profile.target_path.rstrip("/"))
-        self.ensure_dir(backup_dir)
+        self.ensure_backup_dirs()
         command = f"tar -czf {shlex.quote(backup_path)} -C {shlex.quote(parent)} {shlex.quote(name)}"
         self.run_command(command)
         size = self.remote_size(backup_path)
         self.logger.success(f"目录备份完成: {backup_path}")
-        return self.make_backup_record(backup_path, "directory", self.profile.target_path, size)
+        record = self.make_backup_record(backup_path, "directory", self.profile.target_path, size)
+        self.save_backup_record(record)
+        return record
 
     def upload_file(self, progress: ProgressCallback) -> None:
         source = Path(self.profile.source_path)
@@ -244,18 +253,14 @@ class RemoteDeployer:
         self.logger.success("后置命令执行完成")
 
     def prune_backups(self) -> list[BackupRecord]:
-        backup_dir = self.profile_backup_dir()
-        command = f"ls -1t {shlex.quote(backup_dir)}"
-        result = self.run_command(command)
-        names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        if len(names) <= self.profile.max_backup_count:
+        records = [item for item in self.list_backups() if not item.favorite]
+        if len(records) <= self.profile.max_backup_count:
             return []
         deleted: list[BackupRecord] = []
-        for name in names[self.profile.max_backup_count :]:
-            remote = posixpath.join(backup_dir, name)
-            self.run_command(f"rm -rf {shlex.quote(remote)}")
-            deleted.append(self.make_backup_record(remote, "pruned", self.profile.target_path))
-            self.logger.warning(f"滚动删除旧备份: {remote}")
+        for record in records[self.profile.max_backup_count :]:
+            self.delete_backup(record)
+            deleted.append(record)
+            self.logger.warning(f"滚动删除旧备份: {record.remote_backup_path}")
         return deleted
 
     def restore_file(self, backup_path: str, target_path: str) -> None:
@@ -327,9 +332,93 @@ class RemoteDeployer:
     def ensure_dir(self, remote_path: str) -> None:
         self.run_command(f"mkdir -p {shlex.quote(remote_path)}")
 
+    def ensure_backup_dirs(self) -> None:
+        self.ensure_dir(self.backup_payload_dir())
+        self.ensure_dir(self.backup_records_dir())
+
+    def list_backups(self) -> list[BackupRecord]:
+        records_dir = self.backup_records_dir()
+        if not self.path_exists(records_dir):
+            return []
+        assert self.sftp is not None
+        records: list[BackupRecord] = []
+        for item in self.sftp.listdir_attr(records_dir):
+            if not item.filename.endswith(".json"):
+                continue
+            remote_path = posixpath.join(records_dir, item.filename)
+            try:
+                payload = json.loads(self.read_remote_text(remote_path))
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"备份元数据损坏: {remote_path} ({exc})") from exc
+            record = BackupRecord.from_dict(payload)
+            record.metadata_path = remote_path
+            if not record.scope_key:
+                record.scope_key = self.backup_scope_key()
+            if not record.name.strip():
+                record.name = default_backup_name(record.created_at)
+            records.append(record)
+        records.sort(key=lambda item: item.created_at, reverse=True)
+        records.sort(key=lambda item: 0 if item.favorite else 1)
+        return records
+
+    def save_backup_record(self, record: BackupRecord) -> None:
+        record.scope_key = self.backup_scope_key()
+        record.metadata_path = self.backup_metadata_path(record.id)
+        self.ensure_backup_dirs()
+        self.write_remote_text(
+            record.metadata_path,
+            json.dumps(record.to_dict(), ensure_ascii=False, indent=2),
+        )
+
+    def delete_backup(self, record: BackupRecord) -> None:
+        if record.remote_backup_path:
+            self.run_command(f"rm -f {shlex.quote(record.remote_backup_path)}", check=False)
+        metadata_path = record.metadata_path or self.backup_metadata_path(record.id)
+        self.run_command(f"rm -f {shlex.quote(metadata_path)}", check=False)
+
     def profile_backup_dir(self) -> str:
-        safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in self.profile.name)
-        return posixpath.join(self.profile.backup_root, safe)
+        return posixpath.join(self.backup_root_path(), self.backup_scope_dir_name())
+
+    def backup_root_path(self) -> str:
+        return DEFAULT_BACKUP_ROOT
+
+    def backup_payload_dir(self) -> str:
+        return posixpath.join(self.profile_backup_dir(), "payloads")
+
+    def backup_records_dir(self) -> str:
+        return posixpath.join(self.profile_backup_dir(), "records")
+
+    def backup_metadata_path(self, backup_id: str) -> str:
+        return posixpath.join(self.backup_records_dir(), f"{backup_id}.json")
+
+    def backup_scope_dir_name(self) -> str:
+        return f"{self.safe_remote_name(self.backup_scope_label())}_{self.backup_scope_key()}"
+
+    def backup_scope_key(self) -> str:
+        raw = f"{self.profile.source_type}|{self.backup_scope_target_path()}"
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+    def backup_scope_label(self) -> str:
+        target = self.backup_scope_target_path().rstrip("/")
+        if target == "":
+            return "root"
+        return posixpath.basename(target) or "root"
+
+    def backup_scope_target_path(self) -> str:
+        if self.profile.source_type in {SOURCE_TYPE_DIRECTORY, SOURCE_TYPE_ARCHIVE}:
+            return self.profile.target_path.rstrip("/") or "/"
+        resolved = resolve_file_target(
+            self.profile.source_path,
+            self.profile.target_path,
+            self.path_exists,
+            self.is_dir,
+            self.is_file,
+        )
+        return resolved.deploy_path.rstrip("/") or "/"
+
+    def safe_remote_name(self, value: str) -> str:
+        text = value.strip() or "backup"
+        return "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in text)
 
     def file_backup_name(self, target_path: str) -> str:
         target = posixpath.basename(target_path)
@@ -340,6 +429,7 @@ class RemoteDeployer:
         return f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{target}.tar.gz"
 
     def make_backup_record(self, remote_path: str, mode: str, target_path: str, size: int = 0) -> BackupRecord:
+        created_at = datetime.now().isoformat(timespec="seconds")
         return BackupRecord(
             profile_id=self.profile.id,
             profile_name=self.profile.name,
@@ -349,6 +439,9 @@ class RemoteDeployer:
             remote_backup_path=remote_path,
             backup_mode=mode,
             backup_size=size,
+            created_at=created_at,
+            name=default_backup_name(created_at),
+            scope_key=self.backup_scope_key(),
             post_commands=list(self.profile.post_commands),
         )
 
@@ -382,3 +475,13 @@ class RemoteDeployer:
         if check and exit_code != 0:
             raise RuntimeError(result.stderr.strip() or f"命令执行失败: {command}")
         return result
+
+    def read_remote_text(self, remote_path: str) -> str:
+        assert self.sftp is not None
+        with self.sftp.file(remote_path, "rb") as handle:
+            return handle.read().decode("utf-8", errors="replace")
+
+    def write_remote_text(self, remote_path: str, text: str) -> None:
+        assert self.sftp is not None
+        with self.sftp.file(remote_path, "wb") as handle:
+            handle.write(text.encode("utf-8"))

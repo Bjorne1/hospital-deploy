@@ -26,6 +26,7 @@ from ..constants import (
     ACTION_COMMANDS_ONLY,
     ACTION_DEPLOY,
     ACTION_UPLOAD_ONLY,
+    DEFAULT_BACKUP_ROOT,
     SOURCE_TYPE_ARCHIVE,
     SOURCE_TYPE_DIRECTORY,
     SOURCE_TYPE_FILE,
@@ -225,8 +226,8 @@ class MainWindow(ProfileActions, OperationActions, QMainWindow):
         self.max_backup_spin.setValue(10)
         self.max_backup_spin.valueChanged.connect(self.update_summary)
         self.backup_root_edit = QLineEdit(self)
-        self.backup_root_edit.setText("/opt/deploy-backups")
-        self.backup_root_edit.textChanged.connect(self.update_summary)
+        self.backup_root_edit.setText(DEFAULT_BACKUP_ROOT)
+        self.backup_root_edit.setReadOnly(True)
         self.coverage_label = QLabel("文件模式：备份目标文件后覆盖。", self)
         self.coverage_label.setWordWrap(True)
         self.command_edit = QPlainTextEdit(self)

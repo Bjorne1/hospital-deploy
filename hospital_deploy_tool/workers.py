@@ -32,12 +32,14 @@ class OperationWorker(QObject):
         profile: DeploymentProfile,
         log_path: Path,
         backup_record: BackupRecord | None = None,
+        run_post_commands_after_restore: bool = False,
     ) -> None:
         super().__init__()
         self.action = action
         self.profile = profile
         self.log_path = log_path
         self.backup_record = backup_record
+        self.run_post_commands_after_restore = run_post_commands_after_restore
         self.started_at = datetime.now()
         self.logger = RunLogger(log_path, self.forward_log)
 
@@ -61,7 +63,10 @@ class OperationWorker(QObject):
                 return {"backup_record": None, "deleted_backups": []}
             if self.action == ACTION_RESTORE_BACKUP:
                 assert self.backup_record is not None
-                deployer.restore_backup(self.backup_record)
+                deployer.restore_backup(
+                    self.backup_record,
+                    run_post_commands=self.run_post_commands_after_restore,
+                )
                 return {"backup_record": None, "deleted_backups": []}
             result = deployer.deploy(self.action, self.on_progress)
             return {

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PySide2.QtWidgets import QFileDialog, QHBoxLayout, QInputDialog, QLineEdit, QPushButton, QWidget
 
-from ..constants import SOURCE_TYPE_ARCHIVE, SOURCE_TYPE_DIRECTORY
+from ..constants import DEFAULT_BACKUP_ROOT, SOURCE_TYPE_ARCHIVE, SOURCE_TYPE_DIRECTORY
 from ..models import DeploymentProfile
 
 
@@ -41,7 +41,7 @@ class ProfileActions:
         self.password_edit.setText(profile.password)
         self.target_edit.setText(profile.target_path)
         self.max_backup_spin.setValue(profile.max_backup_count)
-        self.backup_root_edit.setText(profile.backup_root)
+        self.backup_root_edit.setText(DEFAULT_BACKUP_ROOT)
         self.command_edit.setPlainText("\n".join(profile.post_commands))
         self.profile_status.setText(f"Profile: {profile.name}")
         self.target_status.setText(
@@ -71,7 +71,7 @@ class ProfileActions:
             target_path=self.target_edit.text().strip(),
             post_commands=commands,
             max_backup_count=self.max_backup_spin.value(),
-            backup_root=self.backup_root_edit.text().strip(),
+            backup_root=DEFAULT_BACKUP_ROOT,
             compress_upload=self.compress_check.isChecked(),
             log_path_default=existing.log_path_default if existing else "",
             log_path_error=existing.log_path_error if existing else "",

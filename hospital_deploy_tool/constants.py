@@ -6,7 +6,7 @@ from pathlib import Path
 
 APP_NAME = "Hospital Deploy Tool"
 APP_SLUG = "hospital-deploy-tool"
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2
 DEFAULT_PORT = 22
 DEFAULT_BACKUP_ROOT = "/opt/deploy-backups"
 DEFAULT_MAX_BACKUPS = 10

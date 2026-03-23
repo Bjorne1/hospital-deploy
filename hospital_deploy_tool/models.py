@@ -23,6 +23,13 @@ def new_id() -> str:
     return uuid4().hex
 
 
+def default_backup_name(created_at: str) -> str:
+    try:
+        return datetime.fromisoformat(created_at).strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return created_at.replace("T", " ").strip() or "未命名备份"
+
+
 @dataclass(slots=True)
 class DeploymentProfile:
     id: str = field(default_factory=new_id)
@@ -85,6 +92,11 @@ class BackupRecord:
     backup_mode: str = ""
     backup_size: int = 0
     created_at: str = field(default_factory=now_iso)
+    name: str = ""
+    description: str = ""
+    favorite: bool = False
+    metadata_path: str = ""
+    scope_key: str = ""
     post_commands: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -97,6 +109,9 @@ class BackupRecord:
             if hasattr(record, key):
                 setattr(record, key, value)
         record.post_commands = [cmd for cmd in record.post_commands if cmd.strip()]
+        if not record.name.strip():
+            record.name = default_backup_name(record.created_at)
+        record.description = record.description or ""
         return record
 
 
