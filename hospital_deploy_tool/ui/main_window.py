@@ -48,6 +48,7 @@ class MainWindow(ProfileActions, OperationActions, QMainWindow):
         self.thread: QThread | None = None
         self.worker: OperationWorker | None = None
         self.current_log_file = ""
+        self.log_viewer_window = None
         self.running_profile_id = ""
         self.active_profile_id = state.profiles[0].id if state.profiles else ""
         self.setWindowTitle("医院一键部署工具")

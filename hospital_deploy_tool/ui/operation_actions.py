@@ -18,7 +18,9 @@ from ..constants import (
 from ..models import BackupRecord, DeploymentProfile, HistoryRecord
 from ..remote import RemoteDeployer
 from ..workers import OperationWorker
-from .dialogs import BackupDialog, HistoryDialog, LogViewerDialog
+from .dialogs import BackupDialog
+from .log_aux_dialogs import HistoryDialog
+from .log_workbench import LogViewerDialog
 
 
 class _SilentLogger:
@@ -107,6 +109,7 @@ class OperationActions:
         log_path = get_logs_dir() / f"{timestamp}_{safe}_{action}.log"
         self.current_log_file = str(log_path)
         self.running_profile_id = profile.id
+        self.refresh_log_viewer(profile, initial_log_file=self.current_log_file, auto_fetch=False)
         self.thread = QThread(self)
         self.worker = OperationWorker(
             action,
@@ -150,6 +153,7 @@ class OperationActions:
         self.storage.add_history(self.state, history)
         if data.get("backup_record"):
             self.storage.save(self.state)
+        self.refresh_log_viewer(profile, auto_fetch=False)
         self.statusBar().showMessage(data["summary"])
         self.set_status("成功" if success else "失败")
         if data["action"] == ACTION_TEST_CONNECTION:
@@ -181,7 +185,6 @@ class OperationActions:
             self.deploy_button,
             self.upload_button,
             self.commands_button,
-            self.log_button,
             self.save_button,
             self.new_button,
             self.rename_button,
@@ -216,19 +219,77 @@ class OperationActions:
         dialog.exec()
 
     def open_history_dialog(self) -> None:
-        HistoryDialog(self.state.history, self).exec()
+        dialog = HistoryDialog(self.state.history, self)
+        dialog.open_log_requested.connect(self.open_history_log)
+        dialog.exec()
 
-    def open_log_viewer(self) -> None:
-        profile = self.current_profile()
-        dlg = LogViewerDialog(profile, self)
-        dlg.config_saved.connect(self.on_log_config_saved)
-        dlg.exec_()
+    def open_log_viewer(
+        self,
+        initial_log_file: str = "",
+        profile: DeploymentProfile | None = None,
+    ) -> None:
+        current_profile = profile or self.current_profile()
+        window = getattr(self, "log_viewer_window", None)
+        if window is None:
+            window = LogViewerDialog(
+                current_profile,
+                self.state.history,
+                current_log_file=self.current_log_file,
+                initial_log_file=initial_log_file,
+                parent=self,
+            )
+            window.config_saved.connect(self.on_log_config_saved)
+            window.destroyed.connect(lambda *_args: setattr(self, "log_viewer_window", None))
+            self.log_viewer_window = window
+        else:
+            window.refresh_context(
+                current_profile,
+                self.state.history,
+                current_log_file=self.current_log_file,
+                initial_log_file=initial_log_file,
+                auto_fetch=False,
+            )
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        window.refresh_context(
+            current_profile,
+            self.state.history,
+            current_log_file=self.current_log_file,
+            initial_log_file=initial_log_file,
+            auto_fetch=True,
+        )
 
-    def on_log_config_saved(self, default_path: str, error_path: str) -> None:
-        profile = self.current_profile()
+    def open_history_log(self, record: HistoryRecord) -> None:
+        profile = self.find_profile(record.profile_id) or self.current_profile()
+        self.open_log_viewer(initial_log_file=record.log_file, profile=profile)
+
+    def on_log_config_saved(self, profile_id: str, default_path: str, error_path: str) -> None:
+        profile = self.find_profile(profile_id)
+        if profile is None:
+            return
         profile.log_path_default = default_path
         profile.log_path_error = error_path
         self.storage.upsert_profile(self.state, profile)
+        self.refresh_log_viewer(profile, auto_fetch=False)
+
+    def refresh_log_viewer(
+        self,
+        profile: DeploymentProfile | None = None,
+        initial_log_file: str = "",
+        auto_fetch: bool = False,
+    ) -> None:
+        window = getattr(self, "log_viewer_window", None)
+        if window is None:
+            return
+        current_profile = profile or self.current_profile()
+        window.refresh_context(
+            current_profile,
+            self.state.history,
+            current_log_file=self.current_log_file,
+            initial_log_file=initial_log_file,
+            auto_fetch=auto_fetch,
+        )
 
     def restore_backup(
         self,
