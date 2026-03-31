@@ -8,6 +8,7 @@ from pathlib import Path
 
 _FULL_TIMESTAMP_RE = re.compile(r"(\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}:\d{2})")
 _SHORT_TIMESTAMP_RE = re.compile(r"(\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+_LINE_START_TIMESTAMP_RE = re.compile(r"^\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}:\d{2}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +59,7 @@ def resolve_time_range(
     custom_end: datetime | None,
     now: datetime | None = None,
 ) -> tuple[datetime | None, datetime | None]:
-    current = now or datetime.now()
+    current = (now or datetime.now()).replace(microsecond=0)
     if mode == "all":
         return None, None
     if mode == "10m":
@@ -90,22 +91,23 @@ def filter_log_lines(
     normalized_exclude = exclude if case_sensitive else exclude.lower()
     matched_indexes: list[int] = []
     skipped_without_time = 0
-    for index, line in enumerate(lines):
-        probe = line if case_sensitive else line.lower()
+    for start, end, event_time in _group_line_events(lines, now):
+        event_lines = lines[start : end + 1]
+        event_text = "\n".join(event_lines)
+        probe = event_text if case_sensitive else event_text.lower()
         if normalized_include and normalized_include not in probe:
             continue
         if normalized_exclude and normalized_exclude in probe:
             continue
         if use_time:
-            parsed_time = parse_line_timestamp(line, now)
-            if parsed_time is None:
-                skipped_without_time += 1
+            if event_time is None:
+                skipped_without_time += end - start + 1
                 continue
-            if start_time is not None and parsed_time < start_time:
+            if start_time is not None and event_time < start_time:
                 continue
-            if end_time is not None and parsed_time > end_time:
+            if end_time is not None and event_time > end_time:
                 continue
-        matched_indexes.append(index)
+        matched_indexes.extend(range(start, end + 1))
     displayed_indexes = _expand_indexes(matched_indexes, len(lines), context_lines)
     filtered_lines = [lines[index] for index in displayed_indexes]
     return FilteredLogResult(
@@ -126,3 +128,27 @@ def _expand_indexes(indexes: list[int], total: int, context_lines: int) -> list[
         end = min(total - 1, index + context_lines)
         expanded.update(range(start, end + 1))
     return sorted(expanded)
+
+
+def _group_line_events(
+    lines: list[str],
+    now: datetime | None,
+) -> list[tuple[int, int, datetime | None]]:
+    if not lines:
+        return []
+    ranges: list[tuple[int, int, datetime | None]] = []
+    start = 0
+    stamp = parse_line_timestamp(lines[0], now) if _is_event_start(lines[0]) else None
+    for index in range(1, len(lines)):
+        line = lines[index]
+        if not _is_event_start(line):
+            continue
+        ranges.append((start, index - 1, stamp))
+        start = index
+        stamp = parse_line_timestamp(line, now)
+    ranges.append((start, len(lines) - 1, stamp))
+    return ranges
+
+
+def _is_event_start(line: str) -> bool:
+    return _LINE_START_TIMESTAMP_RE.search(line) is not None

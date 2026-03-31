@@ -105,6 +105,7 @@ class LogViewerDialog(QDialog):
         self._raw_lines: list[str] = []
         self._display_text = ""
         self._last_result = FilteredLogResult([], 0, 0, 0, 0)
+        self._worker_request: tuple[str, int] | None = None
         self.setWindowTitle(f"日志工作台 - {profile.name} @ {profile.host}")
         self.setWindowFlag(Qt.Window, True)
         self.setWindowFlag(Qt.WindowMinMaxButtonsHint, True)
@@ -152,16 +153,21 @@ class LogViewerDialog(QDialog):
         self._context_spin = QSpinBox(self)
         self._context_spin.setRange(0, 20)
         self._context_spin.setValue(0)
+        self._unescape_newline_check = QCheckBox("还原转义换行", self)
+        self._unescape_newline_check.setChecked(True)
+        self._unescape_newline_check.setToolTip("将日志中的 \\r\\n 与 \\n 显示为真实换行，便于查看多行 SQL")
         row.addWidget(QLabel("筛选", self))
         row.addWidget(self._include_edit, 2)
         row.addWidget(self._exclude_edit, 2)
         row.addWidget(self._case_check)
         row.addWidget(QLabel("上下文", self))
         row.addWidget(self._context_spin)
+        row.addWidget(self._unescape_newline_check)
         self._include_edit.textChanged.connect(self._apply_filters)
         self._exclude_edit.textChanged.connect(self._apply_filters)
         self._case_check.toggled.connect(self._apply_filters)
         self._context_spin.valueChanged.connect(self._apply_filters)
+        self._unescape_newline_check.toggled.connect(self._apply_filters)
         return row
 
     def _build_time_bar(self) -> QHBoxLayout:
@@ -174,14 +180,16 @@ class LogViewerDialog(QDialog):
         self._range_combo.addItem("今天", "today")
         self._range_combo.addItem("自定义", "custom")
         now = QDateTime.currentDateTime()
+        self._custom_start_time = now.addSecs(-3600).toPython()
+        self._custom_end_time = now.toPython()
         self._start_edit = QDateTimeEdit(now.addSecs(-3600), self)
         self._end_edit = QDateTimeEdit(now, self)
         for control in (self._start_edit, self._end_edit):
             control.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
             control.setCalendarPopup(True)
         self._range_combo.currentIndexChanged.connect(self._on_time_mode_changed)
-        self._start_edit.dateTimeChanged.connect(self._apply_filters)
-        self._end_edit.dateTimeChanged.connect(self._apply_filters)
+        self._start_edit.dateTimeChanged.connect(self._on_custom_time_changed)
+        self._end_edit.dateTimeChanged.connect(self._on_custom_time_changed)
         row.addWidget(QLabel("时间范围", self))
         row.addWidget(self._range_combo)
         row.addWidget(QLabel("开始", self))
@@ -310,7 +318,7 @@ class LogViewerDialog(QDialog):
             for source in self._sources:
                 if source.path == self.initial_log_file:
                     return source.key
-        for candidate in (selected_key, "current", "remote_default", "remote_error"):
+        for candidate in (selected_key, "remote_default", "current", "remote_error"):
             if not candidate:
                 continue
             if any(source.key == candidate for source in self._sources):
@@ -328,6 +336,12 @@ class LogViewerDialog(QDialog):
             if source.key == key:
                 return source
         return None
+
+    def _current_request(self) -> tuple[str, int] | None:
+        source = self._current_source()
+        if source is None:
+            return None
+        return source.key, self._line_limit_spin.value()
 
     def _on_source_changed(self) -> None:
         self._update_source_caption()
@@ -354,10 +368,17 @@ class LogViewerDialog(QDialog):
         if source is None:
             self._set_empty_state("当前没有可读取的日志来源")
             return
+        request = self._current_request()
+        if request is None:
+            self._set_empty_state("当前没有可读取的日志来源")
+            return
         if self._worker and self._worker.isRunning():
+            if self._worker_request != request:
+                self._status_label.setText("已切换日志来源，当前加载完成后自动刷新")
             return
         self._status_label.setText("加载中...")
         self._set_fetch_buttons(False)
+        self._worker_request = request
         self._worker = LogFetchWorker(self.profile, source, self._line_limit_spin.value())
         self._worker.finished.connect(self._on_fetch_done)
         self._worker.failed.connect(self._on_fetch_failed)
@@ -369,12 +390,28 @@ class LogViewerDialog(QDialog):
         self._line_limit_spin.setEnabled(enabled)
 
     def _on_fetch_done(self, text: str) -> None:
+        finished_request = self._worker_request
+        self._worker = None
+        self._worker_request = None
+        if self._should_refetch_after_current_worker(finished_request):
+            self._set_fetch_buttons(True)
+            self._status_label.setText("加载中...")
+            self._fetch_current()
+            return
         self._raw_lines = text.splitlines()
         self._apply_filters()
         self._set_fetch_buttons(True)
         self.initial_log_file = ""
 
     def _on_fetch_failed(self, error: str) -> None:
+        finished_request = self._worker_request
+        self._worker = None
+        self._worker_request = None
+        if self._should_refetch_after_current_worker(finished_request):
+            self._set_fetch_buttons(True)
+            self._status_label.setText("加载中...")
+            self._fetch_current()
+            return
         self._raw_lines = []
         self._display_text = f"[错误] {error}"
         self._log_area.setPlainText(self._display_text)
@@ -382,11 +419,11 @@ class LogViewerDialog(QDialog):
         self._set_fetch_buttons(True)
 
     def _apply_filters(self) -> None:
+        start_time, end_time = self._refresh_time_range_display()
         if not self._raw_lines:
             if not self._display_text.startswith("[错误]"):
                 self._set_empty_state("当前日志没有内容")
             return
-        start_time, end_time = self._resolve_active_range()
         self._last_result = filter_log_lines(
             self._raw_lines,
             include_keyword=self._include_edit.text(),
@@ -396,15 +433,31 @@ class LogViewerDialog(QDialog):
             end_time=end_time,
             context_lines=self._context_spin.value(),
         )
-        self._display_text = "\n".join(self._last_result.lines)
+        self._display_text = "\n".join(self._prepare_display_lines(self._last_result.lines))
         self._log_area.setPlainText(self._display_text)
         self._update_status(start_time, end_time)
 
     def _resolve_active_range(self) -> tuple[datetime | None, datetime | None]:
         mode = str(self._range_combo.currentData())
-        custom_start = self._start_edit.dateTime().toPython()
-        custom_end = self._end_edit.dateTime().toPython()
-        return resolve_time_range(mode, custom_start, custom_end)
+        return resolve_time_range(mode, self._custom_start_time, self._custom_end_time)
+
+    def _refresh_time_range_display(self) -> tuple[datetime | None, datetime | None]:
+        start_time, end_time = self._resolve_active_range()
+        self._sync_time_editors(start_time, end_time)
+        return start_time, end_time
+
+    def _sync_time_editors(self, start_time: datetime | None, end_time: datetime | None) -> None:
+        mode = str(self._range_combo.currentData())
+        if mode == "all":
+            return
+        if mode == "custom":
+            start_value = self._custom_start_time
+            end_value = self._custom_end_time
+        else:
+            start_value = start_time
+            end_value = end_time
+        self._set_time_editor_value(self._start_edit, start_value)
+        self._set_time_editor_value(self._end_edit, end_value)
 
     def _update_status(self, start_time: datetime | None, end_time: datetime | None) -> None:
         loaded = len(self._raw_lines)
@@ -416,6 +469,17 @@ class LogViewerDialog(QDialog):
         parts.append(f"最后更新 {datetime.now().strftime('%H:%M:%S')}")
         self._status_label.setText(" | ".join(parts))
         self._jump_to_latest()
+
+    def _prepare_display_lines(self, lines: list[str]) -> list[str]:
+        if not self._unescape_newline_check.isChecked():
+            return lines
+        return [self._restore_escaped_line_breaks(line) for line in lines]
+
+    @staticmethod
+    def _restore_escaped_line_breaks(line: str) -> str:
+        restored = line.replace("\\r\\n", "\n")
+        restored = restored.replace("\\n", "\n")
+        return restored.replace("\\r", "\n")
 
     def _set_empty_state(self, text: str) -> None:
         self._display_text = text
@@ -477,9 +541,33 @@ class LogViewerDialog(QDialog):
         enabled = str(self._range_combo.currentData()) == "custom"
         self._start_edit.setEnabled(enabled)
         self._end_edit.setEnabled(enabled)
+        self._refresh_time_range_display()
         if not hasattr(self, "_log_area"):
             return
         self._apply_filters()
+
+    def _on_custom_time_changed(self) -> None:
+        if str(self._range_combo.currentData()) == "custom":
+            self._custom_start_time = self._start_edit.dateTime().toPython()
+            self._custom_end_time = self._end_edit.dateTime().toPython()
+        self._apply_filters()
+
+    def _should_refetch_after_current_worker(self, finished_request: tuple[str, int] | None) -> bool:
+        if finished_request is None:
+            return False
+        current_request = self._current_request()
+        return current_request is not None and current_request != finished_request
+
+    @staticmethod
+    def _set_time_editor_value(control: QDateTimeEdit, value: datetime | None) -> None:
+        if value is None:
+            return
+        normalized = value.replace(microsecond=0)
+        if control.dateTime().toPython().replace(microsecond=0) == normalized:
+            return
+        control.blockSignals(True)
+        control.setDateTime(QDateTime(normalized))
+        control.blockSignals(False)
 
     def _restore_geometry(self) -> None:
         settings = QSettings(APP_NAME, APP_NAME)
