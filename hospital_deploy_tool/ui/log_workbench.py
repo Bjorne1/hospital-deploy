@@ -273,6 +273,8 @@ class LogViewerDialog(QDialog):
             LogSource("remote_error", "服务日志 | error.log", self._effective_remote_path("error"), "remote"),
         )
         for record in self.history:
+            if record.profile_id != self.profile.id:
+                continue
             if not record.log_file:
                 continue
             status = "成功" if record.success else "失败"

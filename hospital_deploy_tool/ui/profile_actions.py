@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide2.QtCore import QSize, Qt
+from PySide2.QtCore import QItemSelectionModel, QSize, Qt
 from PySide2.QtWidgets import (
+    QAbstractItemView,
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
@@ -25,7 +26,7 @@ from ..models import DeploymentProfile
 
 
 class ProfileActions:
-    def load_profiles(self) -> None:
+    def load_profiles(self, checked_ids: list[str] | None = None) -> None:
         if not self.state.profiles:
             profile = DeploymentProfile(name="默认配置")
             self.state.profiles.append(profile)
@@ -33,7 +34,8 @@ class ProfileActions:
             self.active_profile_id = profile.id
         if not self.find_profile(self.active_profile_id):
             self.active_profile_id = self.state.profiles[0].id
-        self.refresh_profile_list()
+        restored_ids = checked_ids or self.selected_profile_ids()
+        self.refresh_profile_list(restored_ids)
         item = self.profile_list.currentItem()
         if item:
             profile_id = item.data(Qt.UserRole)
@@ -48,6 +50,8 @@ class ProfileActions:
         if sync_list:
             self.set_profile_list_selection(profile.id)
         self.fill_form(profile)
+        self.refresh_profile_runtime_view(profile)
+        self.refresh_log_viewer(profile, auto_fetch=False)
 
     def fill_form(self, profile: DeploymentProfile) -> None:
         self.profile_kind_combo.setCurrentIndex(self.profile_kind_combo.findData(profile.profile_kind))
@@ -121,8 +125,9 @@ class ProfileActions:
         row.addWidget(button)
         return self.wrap(row)
 
-    def refresh_profile_list(self) -> None:
+    def refresh_profile_list(self, checked_ids: list[str] | None = None) -> None:
         selected_id = self.active_profile_id
+        checked_set = set(checked_ids or [])
         visible_ids: list[str] = []
         self.profile_list.blockSignals(True)
         self.profile_list.clear()
@@ -130,30 +135,92 @@ class ProfileActions:
             if not self.matches_profile_filter(profile):
                 continue
             item = QListWidgetItem(self.profile_list_text(profile))
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if profile.id in checked_set else Qt.Unchecked)
             item.setData(Qt.UserRole, profile.id)
             item.setToolTip(self.profile_list_tooltip(profile))
             item.setSizeHint(QSize(0, 52))
             self.profile_list.addItem(item)
             visible_ids.append(profile.id)
+        self.apply_profile_list_selection(visible_ids, selected_id)
         self.profile_list.blockSignals(False)
         self.profile_empty_label.setVisible(not visible_ids)
-        if selected_id in visible_ids:
-            self.set_profile_list_selection(selected_id)
-        elif visible_ids:
-            self.set_profile_list_selection(visible_ids[0])
-        else:
-            self.profile_list.clearSelection()
+        self.update_profile_list_drag_state()
 
     def set_profile_list_selection(self, profile_id: str) -> None:
         self.profile_list.blockSignals(True)
+        self.apply_profile_list_selection(self.visible_profile_ids(), profile_id)
+        self.profile_list.blockSignals(False)
+
+    def apply_profile_list_selection(
+        self,
+        visible_ids: list[str],
+        preferred_current_id: str,
+    ) -> None:
+        current_row = -1
+        self.profile_list.clearSelection()
         for row in range(self.profile_list.count()):
             item = self.profile_list.item(row)
-            if item.data(Qt.UserRole) == profile_id:
-                self.profile_list.setCurrentRow(row)
-                self.profile_list.blockSignals(False)
-                return
-        self.profile_list.clearSelection()
-        self.profile_list.blockSignals(False)
+            profile_id = item.data(Qt.UserRole)
+            if profile_id == preferred_current_id:
+                current_row = row
+        if current_row >= 0:
+            item = self.profile_list.item(current_row)
+            item.setSelected(True)
+            self.profile_list.setCurrentItem(item, QItemSelectionModel.SelectCurrent)
+        elif self.profile_list.count() > 0:
+            item = self.profile_list.item(0)
+            item.setSelected(True)
+            self.profile_list.setCurrentItem(item, QItemSelectionModel.SelectCurrent)
+
+    def selected_profile_ids(self) -> list[str]:
+        selected_ids: list[str] = []
+        for row in range(self.profile_list.count()):
+            item = self.profile_list.item(row)
+            if item.checkState() == Qt.Checked:
+                profile_id = item.data(Qt.UserRole)
+                if profile_id:
+                    selected_ids.append(profile_id)
+        return selected_ids
+
+    def selected_profiles_in_visual_order(self) -> list[DeploymentProfile]:
+        selected_ids = set(self.selected_profile_ids())
+        profiles: list[DeploymentProfile] = []
+        for row in range(self.profile_list.count()):
+            item = self.profile_list.item(row)
+            profile_id = item.data(Qt.UserRole)
+            if profile_id not in selected_ids:
+                continue
+            profile = self.find_profile(profile_id)
+            if profile is not None:
+                profiles.append(profile)
+        return profiles
+
+    def visible_profile_ids(self) -> list[str]:
+        ids: list[str] = []
+        for row in range(self.profile_list.count()):
+            item = self.profile_list.item(row)
+            profile_id = item.data(Qt.UserRole)
+            if profile_id:
+                ids.append(profile_id)
+        return ids
+
+    def update_profile_list_drag_state(self) -> None:
+        allow_drag = not self.profile_search_edit.text().strip() and self.profile_filter_combo.currentData() is None
+        mode = QAbstractItemView.InternalMove if allow_drag else QAbstractItemView.NoDragDrop
+        self.profile_list.setDragDropMode(mode)
+        self.profile_list.setDragEnabled(allow_drag)
+        self.profile_list.setAcceptDrops(allow_drag)
+
+    def on_profile_rows_moved(self, *_args) -> None:
+        if self.profile_search_edit.text().strip() or self.profile_filter_combo.currentData() is not None:
+            return
+        ordered_ids = self.visible_profile_ids()
+        if len(ordered_ids) != len(self.state.profiles):
+            return
+        profiles_by_id = {profile.id: profile for profile in self.state.profiles}
+        self.state.profiles = [profiles_by_id[profile_id] for profile_id in ordered_ids if profile_id in profiles_by_id]
+        self.storage.save(self.state)
 
     def matches_profile_filter(self, profile: DeploymentProfile) -> bool:
         kind_filter = self.profile_filter_combo.currentData()
@@ -228,27 +295,30 @@ class ProfileActions:
         self.fill_form(profile)
 
     def on_save_profile(self) -> None:
+        selected_ids = self.selected_profile_ids()
         profile = self.snapshot_profile()
         self.storage.upsert_profile(self.state, profile)
         self.active_profile_id = profile.id
-        self.load_profiles()
+        self.load_profiles(selected_ids or [profile.id])
 
     def on_rename_profile(self) -> None:
         profile = self.current_profile()
         name, ok = QInputDialog.getText(self, "重命名配置", "请输入新名称", text=profile.name)
         if ok and name.strip():
+            selected_ids = self.selected_profile_ids()
             profile.name = name.strip()
             self.storage.upsert_profile(self.state, profile)
-            self.load_profiles()
+            self.load_profiles(selected_ids or [profile.id])
 
     def on_clone_profile(self) -> None:
         current = self.current_profile()
         name, ok = QInputDialog.getText(self, "复制配置", "请输入新配置名称", text=f"{current.name} - 副本")
         if ok and name.strip():
+            selected_ids = self.selected_profile_ids()
             profile = self.snapshot_profile(profile_id=DeploymentProfile().id, name=name.strip())
             self.storage.upsert_profile(self.state, profile)
             self.active_profile_id = profile.id
-            self.load_profiles()
+            self.load_profiles(selected_ids + [profile.id])
 
     def toggle_password_visible(self) -> None:
         if self.password_edit.echoMode() == QLineEdit.Password:

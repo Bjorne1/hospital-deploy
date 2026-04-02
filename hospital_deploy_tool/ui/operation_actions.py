@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from ..constants import (
     SOURCE_TYPE_FILE,
     get_logs_dir,
 )
+from ..log_tools import read_local_tail
 from ..models import BackupRecord, DeploymentProfile, HistoryRecord
 from ..remote import RemoteDeployer
 from ..workers import OperationWorker
@@ -37,6 +39,17 @@ class _SilentLogger:
         return None
 
 
+_INLINE_LOG_LINES = 1000
+
+
+@dataclass(slots=True)
+class QueuedOperation:
+    action: str
+    profile: DeploymentProfile
+    backup_record: BackupRecord | None = None
+    run_post_commands_after_restore: bool = False
+
+
 class OperationActions:
     def test_connection(self) -> None:
         profile = self.persist_form_profile()
@@ -50,7 +63,7 @@ class OperationActions:
         backup_record: BackupRecord | None = None,
         run_post_commands_after_restore: bool = False,
     ) -> None:
-        if self.thread is not None:
+        if self.thread is not None or self.operation_queue:
             QMessageBox.warning(self, "操作进行中", "当前已有任务在执行，请等待完成。")
             return
         current = profile or self.persist_form_profile()
@@ -64,11 +77,56 @@ class OperationActions:
         self.start_worker(action, current, backup_record, run_post_commands_after_restore)
 
     def persist_form_profile(self) -> DeploymentProfile:
+        selected_ids = self.selected_profile_ids()
         profile = self.snapshot_profile()
         self.storage.upsert_profile(self.state, profile)
         self.active_profile_id = profile.id
-        self.load_profiles()
+        self.load_profiles(selected_ids or [profile.id])
         return profile
+
+    def start_batch_deploy(self) -> None:
+        if self.thread is not None or self.operation_queue:
+            QMessageBox.warning(self, "操作进行中", "当前已有任务在执行，请等待完成。")
+            return
+        self.persist_form_profile()
+        profiles = self.selected_profiles_in_visual_order()
+        if not profiles:
+            QMessageBox.warning(self, "批量部署", "请先勾选至少一个配置。")
+            return
+        self.batch_stop_on_failure = self.batch_stop_on_failure_check.isChecked()
+        summary = "\n".join(
+            f"{index}. {profile.name} -> {profile.host}:{profile.port} {profile.target_path or '-'}"
+            for index, profile in enumerate(profiles, start=1)
+        )
+        fail_strategy = "失败后停止后续任务" if self.batch_stop_on_failure else "失败后继续执行下一个"
+        answer = QMessageBox.question(
+            self,
+            "批量部署",
+            f"将按顺序部署以下 {len(profiles)} 个配置：\n\n{summary}\n\n失败策略：{fail_strategy}。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.operation_queue = [QueuedOperation(ACTION_DEPLOY, profile) for profile in profiles]
+        self.batch_total = len(self.operation_queue)
+        self.batch_finished = 0
+        self.batch_has_failure = False
+        self.batch_failed_count = 0
+        self.start_next_queued_operation()
+
+    def start_next_queued_operation(self) -> None:
+        if not self.operation_queue:
+            return
+        current = self.operation_queue.pop(0)
+        self.statusBar().showMessage(
+            f"批量部署 {self.batch_finished + 1}/{self.batch_total}: {current.profile.name}"
+        )
+        self.start_worker(
+            current.action,
+            current.profile,
+            current.backup_record,
+            current.run_post_commands_after_restore,
+        )
 
     def confirm_action(
         self,
@@ -100,16 +158,13 @@ class OperationActions:
         run_post_commands_after_restore: bool = False,
     ) -> None:
         self.set_busy(True)
-        self.clear_log()
-        self.progress_bar.setValue(0)
-        self.current_file_label.setText("准备执行...")
-        self.progress_detail_label.setText("-")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in profile.name)
         log_path = get_logs_dir() / f"{timestamp}_{safe}_{action}.log"
         self.current_log_file = str(log_path)
         self.running_profile_id = profile.id
-        self.refresh_log_viewer(profile, initial_log_file=self.current_log_file, auto_fetch=False)
+        self.prepare_runtime_view_for_operation(profile)
+        self.refresh_log_viewer(initial_log_file=self.current_log_file, auto_fetch=False)
         self.thread = QThread(self)
         self.worker = OperationWorker(
             action,
@@ -153,11 +208,19 @@ class OperationActions:
         self.storage.add_history(self.state, history)
         if data.get("backup_record"):
             self.storage.save(self.state)
-        self.refresh_log_viewer(profile, auto_fetch=False)
+        self.refresh_profile_runtime_view()
+        self.refresh_log_viewer(auto_fetch=False)
         self.statusBar().showMessage(data["summary"])
         self.set_status("成功" if success else "失败")
         if data["action"] == ACTION_TEST_CONNECTION:
             self.connection_state.setText("连接成功" if success else "连接失败")
+        if self.batch_total:
+            self.batch_finished += 1
+            if not success:
+                self.batch_has_failure = True
+                self.batch_failed_count += 1
+            if not success and self.batch_stop_on_failure:
+                self.operation_queue.clear()
 
     def on_thread_finished(self) -> None:
         if self.worker is not None:
@@ -167,12 +230,36 @@ class OperationActions:
         self.worker = None
         self.thread = None
         self.running_profile_id = ""
+        if self.operation_queue:
+            self.start_next_queued_operation()
+            return
         self.set_busy(False)
+        if self.batch_total:
+            if self.batch_has_failure and self.batch_stop_on_failure:
+                self.statusBar().showMessage(
+                    f"批量部署已停止，已完成 {self.batch_finished}/{self.batch_total} 个配置。"
+                )
+            elif self.batch_has_failure:
+                self.statusBar().showMessage(
+                    f"批量部署完成，共 {self.batch_total} 个配置，失败 {self.batch_failed_count} 个。"
+                )
+            else:
+                self.statusBar().showMessage(f"批量部署完成，共 {self.batch_total} 个配置。")
+            self.batch_total = 0
+            self.batch_finished = 0
+            self.batch_has_failure = False
+            self.batch_failed_count = 0
+            self.batch_stop_on_failure = False
+        self.refresh_profile_runtime_view()
 
     def append_log(self, _level: str, line: str) -> None:
+        if self.active_profile_id != self.running_profile_id:
+            return
         self.log_edit.appendPlainText(line)
 
     def update_progress(self, percent: int, file_text: str, detail: str) -> None:
+        if self.active_profile_id != self.running_profile_id:
+            return
         self.progress_bar.setValue(percent)
         self.current_file_label.setText(file_text)
         self.progress_detail_label.setText(detail)
@@ -183,6 +270,8 @@ class OperationActions:
     def set_busy(self, busy: bool) -> None:
         buttons = [
             self.deploy_button,
+            self.batch_deploy_button,
+            self.batch_stop_on_failure_check,
             self.upload_button,
             self.commands_button,
             self.save_button,
@@ -229,12 +318,13 @@ class OperationActions:
         profile: DeploymentProfile | None = None,
     ) -> None:
         current_profile = profile or self.current_profile()
+        current_log_file = self.current_log_file_for_profile(current_profile)
         window = getattr(self, "log_viewer_window", None)
         if window is None:
             window = LogViewerDialog(
                 current_profile,
                 self.state.history,
-                current_log_file=self.current_log_file,
+                current_log_file=current_log_file,
                 initial_log_file=initial_log_file,
                 parent=self,
             )
@@ -245,7 +335,7 @@ class OperationActions:
             window.refresh_context(
                 current_profile,
                 self.state.history,
-                current_log_file=self.current_log_file,
+                current_log_file=current_log_file,
                 initial_log_file=initial_log_file,
                 auto_fetch=False,
             )
@@ -255,7 +345,7 @@ class OperationActions:
         window.refresh_context(
             current_profile,
             self.state.history,
-            current_log_file=self.current_log_file,
+            current_log_file=current_log_file,
             initial_log_file=initial_log_file,
             auto_fetch=True,
         )
@@ -286,7 +376,7 @@ class OperationActions:
         window.refresh_context(
             current_profile,
             self.state.history,
-            current_log_file=self.current_log_file,
+            current_log_file=self.current_log_file_for_profile(current_profile),
             initial_log_file=initial_log_file,
             auto_fetch=auto_fetch,
         )
@@ -396,6 +486,57 @@ class OperationActions:
 
     def clear_log(self) -> None:
         self.log_edit.clear()
+
+    def current_log_file_for_profile(self, profile: DeploymentProfile) -> str:
+        if profile.id == self.running_profile_id:
+            return self.current_log_file
+        return ""
+
+    def latest_history_for_profile(self, profile_id: str) -> HistoryRecord | None:
+        return next(
+            (
+                record
+                for record in self.state.history
+                if record.profile_id == profile_id and record.log_file
+            ),
+            None,
+        )
+
+    def prepare_runtime_view_for_operation(self, profile: DeploymentProfile) -> None:
+        if self.active_profile_id != profile.id:
+            return
+        self.clear_log()
+        self.progress_bar.setValue(0)
+        self.current_file_label.setText("准备执行...")
+        self.progress_detail_label.setText("-")
+
+    def refresh_profile_runtime_view(self, profile: DeploymentProfile | None = None) -> None:
+        current_profile = profile or self.current_profile()
+        if current_profile.id == self.running_profile_id and self.current_log_file:
+            self.load_log_preview(
+                self.current_log_file,
+                file_text=Path(self.current_log_file).name,
+                detail="执行中",
+            )
+            return
+        history = self.latest_history_for_profile(current_profile.id)
+        if history is None:
+            self.progress_bar.setValue(0)
+            self.current_file_label.setText("尚未开始")
+            self.progress_detail_label.setText("当前配置暂无部署日志")
+            self.log_edit.setPlainText("当前配置暂无部署日志。")
+            return
+        detail = f"{history.started_at} | {'成功' if history.success else '失败'}"
+        self.load_log_preview(history.log_file, file_text=Path(history.log_file).name, detail=detail)
+
+    def load_log_preview(self, path: str, *, file_text: str, detail: str) -> None:
+        self.progress_bar.setValue(0)
+        self.current_file_label.setText(file_text)
+        self.progress_detail_label.setText(detail)
+        try:
+            self.log_edit.setPlainText(read_local_tail(path, _INLINE_LOG_LINES))
+        except Exception as exc:  # noqa: BLE001
+            self.log_edit.setPlainText(f"[错误] {exc}")
 
     def export_log(self) -> None:
         if not self.log_edit.toPlainText():

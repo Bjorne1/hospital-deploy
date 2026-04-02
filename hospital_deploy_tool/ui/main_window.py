@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide2.QtCore import QThread
+from PySide2.QtCore import Qt, QThread
 from PySide2.QtGui import QIcon
 from PySide2.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QListWidget,
     QFormLayout,
@@ -54,6 +55,12 @@ class MainWindow(ProfileActions, OperationActions, QMainWindow):
         self.current_log_file = ""
         self.log_viewer_window = None
         self.running_profile_id = ""
+        self.operation_queue = []
+        self.batch_total = 0
+        self.batch_finished = 0
+        self.batch_has_failure = False
+        self.batch_failed_count = 0
+        self.batch_stop_on_failure = False
         self.active_profile_id = state.profiles[0].id if state.profiles else ""
         self.setWindowTitle("医院一键部署工具")
         icon_path = self._find_icon()
@@ -115,7 +122,14 @@ class MainWindow(ProfileActions, OperationActions, QMainWindow):
         self.profile_list = QListWidget(self)
         self.profile_list.setMinimumHeight(220)
         self.profile_list.setWordWrap(True)
+        self.profile_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.profile_list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.profile_list.setDefaultDropAction(Qt.MoveAction)
+        self.profile_list.setDragEnabled(True)
+        self.profile_list.setAcceptDrops(True)
+        self.profile_list.setDropIndicatorShown(True)
         self.profile_list.itemSelectionChanged.connect(self.on_profile_selected)
+        self.profile_list.model().rowsMoved.connect(self.on_profile_rows_moved)
         layout.addWidget(self.profile_list)
 
         self.profile_empty_label = QLabel("没有匹配的配置", self)
@@ -314,12 +328,23 @@ class MainWindow(ProfileActions, OperationActions, QMainWindow):
             lambda: self.start_operation(ACTION_COMMANDS_ONLY),
             "muted",
         )
+        self.batch_deploy_button = self.button("批量部署", self.start_batch_deploy, "secondary")
+        self.batch_stop_on_failure_check = QCheckBox("失败中断", self)
+        self.batch_stop_on_failure_check.setChecked(False)
+        self.batch_stop_on_failure_check.setToolTip("勾选后，批量部署遇到失败会停止后续任务。")
         self.log_button = self.button("查看日志", self.open_log_viewer, "muted")
         layout.addWidget(self.summary_label, 1)
         row = QHBoxLayout()
+        batch_widget = QWidget(self)
+        batch_layout = QVBoxLayout(batch_widget)
+        batch_layout.setContentsMargins(0, 0, 0, 0)
+        batch_layout.setSpacing(4)
+        batch_layout.addWidget(self.batch_deploy_button)
+        batch_layout.addWidget(self.batch_stop_on_failure_check, 0, Qt.AlignHCenter)
         row.addWidget(self.deploy_button)
         row.addWidget(self.upload_button)
         row.addWidget(self.commands_button)
+        row.addWidget(batch_widget)
         row.addWidget(self.log_button)
         layout.addLayout(row)
         return group
