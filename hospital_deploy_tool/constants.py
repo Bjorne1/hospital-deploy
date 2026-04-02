@@ -6,13 +6,16 @@ from pathlib import Path
 
 APP_NAME = "Hospital Deploy Tool"
 APP_SLUG = "hospital-deploy-tool"
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 DEFAULT_PORT = 22
 DEFAULT_BACKUP_ROOT = "/opt/deploy-backups"
 DEFAULT_MAX_BACKUPS = 10
 SOURCE_TYPE_FILE = "file"
 SOURCE_TYPE_DIRECTORY = "directory"
 SOURCE_TYPE_ARCHIVE = "archive"
+PROFILE_KIND_UNSET = "unset"
+PROFILE_KIND_BACKEND = "backend"
+PROFILE_KIND_FRONTEND = "frontend"
 ACTION_DEPLOY = "deploy"
 ACTION_UPLOAD_ONLY = "upload_only"
 ACTION_COMMANDS_ONLY = "commands_only"

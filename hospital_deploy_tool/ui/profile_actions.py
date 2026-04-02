@@ -2,9 +2,25 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide2.QtWidgets import QFileDialog, QHBoxLayout, QInputDialog, QLineEdit, QPushButton, QWidget
+from PySide2.QtCore import QSize, Qt
+from PySide2.QtWidgets import (
+    QFileDialog,
+    QHBoxLayout,
+    QInputDialog,
+    QLineEdit,
+    QListWidgetItem,
+    QPushButton,
+    QWidget,
+)
 
-from ..constants import DEFAULT_BACKUP_ROOT, SOURCE_TYPE_ARCHIVE, SOURCE_TYPE_DIRECTORY
+from ..constants import (
+    DEFAULT_BACKUP_ROOT,
+    PROFILE_KIND_BACKEND,
+    PROFILE_KIND_FRONTEND,
+    PROFILE_KIND_UNSET,
+    SOURCE_TYPE_ARCHIVE,
+    SOURCE_TYPE_DIRECTORY,
+)
 from ..models import DeploymentProfile
 
 
@@ -15,23 +31,26 @@ class ProfileActions:
             self.state.profiles.append(profile)
             self.storage.save(self.state)
             self.active_profile_id = profile.id
-        self.profile_combo.blockSignals(True)
-        self.profile_combo.clear()
-        for profile in self.state.profiles:
-            self.profile_combo.addItem(profile.name, profile.id)
-        self.profile_combo.blockSignals(False)
+        if not self.find_profile(self.active_profile_id):
+            self.active_profile_id = self.state.profiles[0].id
+        self.refresh_profile_list()
+        item = self.profile_list.currentItem()
+        if item:
+            profile_id = item.data(Qt.UserRole)
+            if profile_id:
+                self.select_profile(profile_id, sync_list=False)
+                return
         self.select_profile(self.active_profile_id)
 
-    def select_profile(self, profile_id: str) -> None:
+    def select_profile(self, profile_id: str, *, sync_list: bool = True) -> None:
         profile = self.find_profile(profile_id) or self.state.profiles[0]
-        index = self.profile_combo.findData(profile.id)
-        self.profile_combo.blockSignals(True)
-        self.profile_combo.setCurrentIndex(index)
-        self.profile_combo.blockSignals(False)
         self.active_profile_id = profile.id
+        if sync_list:
+            self.set_profile_list_selection(profile.id)
         self.fill_form(profile)
 
     def fill_form(self, profile: DeploymentProfile) -> None:
+        self.profile_kind_combo.setCurrentIndex(self.profile_kind_combo.findData(profile.profile_kind))
         self.source_type_combo.setCurrentIndex(self.source_type_combo.findData(profile.source_type))
         self.compress_check.setChecked(profile.compress_upload)
         self.source_path_edit.setText(profile.source_path)
@@ -43,7 +62,7 @@ class ProfileActions:
         self.max_backup_spin.setValue(profile.max_backup_count)
         self.backup_root_edit.setText(DEFAULT_BACKUP_ROOT)
         self.command_edit.setPlainText("\n".join(profile.post_commands))
-        self.profile_status.setText(f"Profile: {profile.name}")
+        self.profile_status.setText(f"配置: {profile.name} | {self.profile_kind_text(profile.profile_kind)}")
         self.target_status.setText(
             f"目标: {self.host_port_text(profile)} {profile.target_path or ''}".strip()
         )
@@ -62,6 +81,7 @@ class ProfileActions:
         return DeploymentProfile(
             id=profile_id or self.active_profile_id or DeploymentProfile().id,
             name=profile_name,
+            profile_kind=self.profile_kind_combo.currentData() or PROFILE_KIND_UNSET,
             source_type=self.source_type_combo.currentData(),
             source_path=self.source_path_edit.text().strip(),
             host=self.host_edit.text().strip(),
@@ -101,14 +121,110 @@ class ProfileActions:
         row.addWidget(button)
         return self.wrap(row)
 
+    def refresh_profile_list(self) -> None:
+        selected_id = self.active_profile_id
+        visible_ids: list[str] = []
+        self.profile_list.blockSignals(True)
+        self.profile_list.clear()
+        for profile in self.state.profiles:
+            if not self.matches_profile_filter(profile):
+                continue
+            item = QListWidgetItem(self.profile_list_text(profile))
+            item.setData(Qt.UserRole, profile.id)
+            item.setToolTip(self.profile_list_tooltip(profile))
+            item.setSizeHint(QSize(0, 52))
+            self.profile_list.addItem(item)
+            visible_ids.append(profile.id)
+        self.profile_list.blockSignals(False)
+        self.profile_empty_label.setVisible(not visible_ids)
+        if selected_id in visible_ids:
+            self.set_profile_list_selection(selected_id)
+        elif visible_ids:
+            self.set_profile_list_selection(visible_ids[0])
+        else:
+            self.profile_list.clearSelection()
+
+    def set_profile_list_selection(self, profile_id: str) -> None:
+        self.profile_list.blockSignals(True)
+        for row in range(self.profile_list.count()):
+            item = self.profile_list.item(row)
+            if item.data(Qt.UserRole) == profile_id:
+                self.profile_list.setCurrentRow(row)
+                self.profile_list.blockSignals(False)
+                return
+        self.profile_list.clearSelection()
+        self.profile_list.blockSignals(False)
+
+    def matches_profile_filter(self, profile: DeploymentProfile) -> bool:
+        kind_filter = self.profile_filter_combo.currentData()
+        if kind_filter and profile.profile_kind != kind_filter:
+            return False
+        keyword = self.profile_search_edit.text().strip().lower()
+        if not keyword:
+            return True
+        haystack = " ".join(
+            [
+                profile.name,
+                self.profile_kind_text(profile.profile_kind),
+                profile.host,
+                profile.target_path,
+                profile.source_path,
+            ]
+        ).lower()
+        return keyword in haystack
+
+    def profile_kind_text(self, profile_kind: str) -> str:
+        if profile_kind == PROFILE_KIND_BACKEND:
+            return "后端"
+        if profile_kind == PROFILE_KIND_FRONTEND:
+            return "前端"
+        return "未设置"
+
+    def profile_list_text(self, profile: DeploymentProfile) -> str:
+        details = "  ".join(
+            part
+            for part in [
+                self.profile_kind_text(profile.profile_kind),
+                self.host_port_text(profile),
+                self.short_text(profile.target_path or profile.source_path or "-"),
+            ]
+            if part
+        )
+        return f"{profile.name}\n{details}"
+
+    def profile_list_tooltip(self, profile: DeploymentProfile) -> str:
+        return (
+            f"类型: {self.profile_kind_text(profile.profile_kind)}\n"
+            f"主机: {self.host_port_text(profile)}\n"
+            f"目标路径: {profile.target_path or '-'}\n"
+            f"源路径: {profile.source_path or '-'}"
+        )
+
+    @staticmethod
+    def short_text(value: str, limit: int = 48) -> str:
+        if len(value) <= limit:
+            return value
+        return f"{value[:limit]}..."
+
     def on_profile_selected(self) -> None:
-        profile_id = self.profile_combo.currentData()
+        item = self.profile_list.currentItem()
+        profile_id = item.data(Qt.UserRole) if item else None
         if profile_id:
-            self.select_profile(profile_id)
+            self.select_profile(profile_id, sync_list=False)
+
+    def on_profile_filter_changed(self) -> None:
+        previous_id = self.active_profile_id
+        self.refresh_profile_list()
+        item = self.profile_list.currentItem()
+        if item:
+            profile_id = item.data(Qt.UserRole)
+            if profile_id and profile_id != previous_id:
+                self.select_profile(profile_id, sync_list=False)
 
     def on_new_profile(self) -> None:
         profile = DeploymentProfile(name="新配置")
         self.active_profile_id = profile.id
+        self.profile_list.clearSelection()
         self.fill_form(profile)
 
     def on_save_profile(self) -> None:
@@ -187,6 +303,7 @@ class ProfileActions:
         else:
             self.coverage_label.setText("文件模式：目标路径可填目录或完整文件路径；填目录时按源文件名上传，同名文件存在则先备份后覆盖。")
         profile = self.snapshot_profile()
+        self.profile_status.setText(f"配置: {profile.name} | {self.profile_kind_text(profile.profile_kind)}")
         self.summary_label.setText(self.summary_text(profile))
         self.target_status.setText(
             f"目标: {self.host_port_text(profile)} {profile.target_path or ''}".strip()
@@ -195,6 +312,7 @@ class ProfileActions:
     def summary_text(self, profile: DeploymentProfile) -> str:
         command_count = len([cmd for cmd in profile.post_commands if cmd.strip()])
         return (
+            f"配置类型: {self.profile_kind_text(profile.profile_kind)}\n"
             f"源路径: {profile.source_path or '-'}\n"
             f"目标: {self.host_port_text(profile)} -> {profile.target_path or '-'}\n"
             f"备份目录: {profile.backup_root or '-'}\n"

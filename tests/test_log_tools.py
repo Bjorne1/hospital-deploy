@@ -13,6 +13,7 @@ from hospital_deploy_tool.log_tools import (
     read_local_tail,
     resolve_time_range,
 )
+from hospital_deploy_tool.constants import PROFILE_KIND_UNSET
 from hospital_deploy_tool.models import DeploymentProfile
 from hospital_deploy_tool.ui.log_workbench import LogViewerDialog
 
@@ -173,6 +174,14 @@ class LogToolsTests(unittest.TestCase):
             self.assertIn("SELECT 1\\nFROM dual", dialog._display_text)
         finally:
             dialog.close()
+
+    def test_profile_defaults_to_unset_kind_when_old_config_has_no_field(self) -> None:
+        profile = DeploymentProfile.from_dict({"name": "legacy"})
+        self.assertEqual(profile.profile_kind, PROFILE_KIND_UNSET)
+
+    def test_profile_invalid_kind_falls_back_to_unset(self) -> None:
+        profile = DeploymentProfile.from_dict({"name": "broken", "profile_kind": "java"})
+        self.assertEqual(profile.profile_kind, PROFILE_KIND_UNSET)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from PySide2.QtCore import QThread
 from PySide2.QtGui import QIcon
 from PySide2.QtWidgets import (
     QCheckBox,
+    QListWidget,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -27,6 +28,9 @@ from ..constants import (
     ACTION_DEPLOY,
     ACTION_UPLOAD_ONLY,
     DEFAULT_BACKUP_ROOT,
+    PROFILE_KIND_BACKEND,
+    PROFILE_KIND_FRONTEND,
+    PROFILE_KIND_UNSET,
     SOURCE_TYPE_ARCHIVE,
     SOURCE_TYPE_DIRECTORY,
     SOURCE_TYPE_FILE,
@@ -86,43 +90,94 @@ class MainWindow(ProfileActions, OperationActions, QMainWindow):
     def profile_group(self) -> QGroupBox:
         group = QGroupBox("配置管理", self)
         layout = QVBoxLayout(group)
-        combo_row = QHBoxLayout()
-        combo_row.addWidget(QLabel("当前 Profile", self))
-        self.profile_combo = QComboBox(self)
-        self.profile_combo.currentIndexChanged.connect(self.on_profile_selected)
-        combo_row.addWidget(self.profile_combo, 1)
-        layout.addLayout(combo_row)
-        button_row = QHBoxLayout()
+        search_row = QHBoxLayout()
+        search_row.addWidget(QLabel("搜索", self))
+        self.profile_search_edit = QLineEdit(self)
+        self.profile_search_edit.setPlaceholderText("按配置名、IP、路径筛选")
+        self.profile_search_edit.textChanged.connect(self.on_profile_filter_changed)
+        search_row.addWidget(self.profile_search_edit, 1)
+        layout.addLayout(search_row)
+
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("筛选", self))
+        self.profile_filter_combo = QComboBox(self)
+        self.profile_filter_combo.addItem("全部", None)
+        self.profile_filter_combo.addItem("后端", PROFILE_KIND_BACKEND)
+        self.profile_filter_combo.addItem("前端", PROFILE_KIND_FRONTEND)
+        self.profile_filter_combo.addItem("未设置", PROFILE_KIND_UNSET)
+        self.profile_filter_combo.currentIndexChanged.connect(self.on_profile_filter_changed)
+        filter_row.addWidget(self.profile_filter_combo)
         self.new_button = self.button("新建", self.on_new_profile, "secondary")
+        filter_row.addStretch(1)
+        filter_row.addWidget(self.new_button)
+        layout.addLayout(filter_row)
+
+        self.profile_list = QListWidget(self)
+        self.profile_list.setMinimumHeight(220)
+        self.profile_list.setWordWrap(True)
+        self.profile_list.itemSelectionChanged.connect(self.on_profile_selected)
+        layout.addWidget(self.profile_list)
+
+        self.profile_empty_label = QLabel("没有匹配的配置", self)
+        self.profile_empty_label.setProperty("role", "muted")
+        self.profile_empty_label.setVisible(False)
+        layout.addWidget(self.profile_empty_label)
+
+        kind_row = QHBoxLayout()
+        kind_row.addWidget(QLabel("当前类型", self))
+        self.profile_kind_combo = QComboBox(self)
+        self.profile_kind_combo.addItem("未设置", PROFILE_KIND_UNSET)
+        self.profile_kind_combo.addItem("后端", PROFILE_KIND_BACKEND)
+        self.profile_kind_combo.addItem("前端", PROFILE_KIND_FRONTEND)
+        self.profile_kind_combo.currentIndexChanged.connect(self.update_summary)
+        kind_row.addWidget(self.profile_kind_combo, 1)
+        layout.addLayout(kind_row)
+
+        primary_button_row = QHBoxLayout()
         self.save_button = self.button("保存", self.on_save_profile)
         self.rename_button = self.button("重命名", self.on_rename_profile, "secondary")
         self.clone_button = self.button("复制", self.on_clone_profile, "secondary")
         self.backup_button = self.button("备份管理", self.open_backup_dialog, "muted")
         self.history_button = self.button("执行历史", self.open_history_dialog, "muted")
-        button_row.addWidget(self.new_button)
-        button_row.addWidget(self.save_button)
-        button_row.addWidget(self.rename_button)
-        button_row.addWidget(self.clone_button)
-        button_row.addWidget(self.backup_button)
-        button_row.addWidget(self.history_button)
-        layout.addLayout(button_row)
+        primary_button_row.addWidget(self.save_button)
+        primary_button_row.addWidget(self.rename_button)
+        primary_button_row.addWidget(self.clone_button)
+        layout.addLayout(primary_button_row)
+
+        secondary_button_row = QHBoxLayout()
+        secondary_button_row.addWidget(self.backup_button)
+        secondary_button_row.addWidget(self.history_button)
+        layout.addLayout(secondary_button_row)
         return group
 
     def build_left_panel(self) -> QWidget:
-        container = QWidget(self)
-        layout = QVBoxLayout(container)
-        layout.addWidget(self.profile_group())
-        layout.addWidget(self.source_group())
+        root = QWidget(self)
+        layout = QHBoxLayout(root)
+
+        profile_panel = QWidget(self)
+        profile_panel.setMinimumWidth(220)
+        profile_panel.setMaximumWidth(260)
+        profile_layout = QVBoxLayout(profile_panel)
+        profile_layout.setContentsMargins(0, 0, 0, 0)
+        profile_layout.addWidget(self.profile_group(), 1)
+
+        form_container = QWidget(self)
+        form_layout = QVBoxLayout(form_container)
+        form_layout.addWidget(self.source_group())
         middle = QHBoxLayout()
-        middle.addWidget(self.linux_group(), 55)
-        middle.addWidget(self.behavior_group(), 45)
-        layout.addLayout(middle)
-        layout.addWidget(self.action_group())
-        layout.addStretch(1)
+        middle.addWidget(self.linux_group(), 1)
+        middle.addWidget(self.behavior_group(), 1)
+        form_layout.addLayout(middle)
+        form_layout.addWidget(self.action_group())
+        form_layout.addStretch(1)
+
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
-        scroll.setWidget(container)
-        return scroll
+        scroll.setWidget(form_container)
+
+        layout.addWidget(profile_panel)
+        layout.addWidget(scroll, 1)
+        return root
 
     def build_right_panel(self) -> QWidget:
         panel = QWidget(self)

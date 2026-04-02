@@ -20,11 +20,19 @@ QGroupBox::title {
     left: 12px;
     padding: 0 4px;
 }
-QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QTableWidget {
+QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QTableWidget, QListWidget {
     border: 1px solid #c9d3e0;
     border-radius: 8px;
     background: #ffffff;
     padding: 6px;
+}
+QListWidget::item {
+    padding: 8px 6px;
+    border-radius: 6px;
+}
+QListWidget::item:selected {
+    background: #dbeafe;
+    color: #1d4ed8;
 }
 QPushButton {
     border: 0;

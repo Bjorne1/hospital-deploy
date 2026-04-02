@@ -9,6 +9,9 @@ from .constants import (
     DEFAULT_BACKUP_ROOT,
     DEFAULT_MAX_BACKUPS,
     DEFAULT_PORT,
+    PROFILE_KIND_BACKEND,
+    PROFILE_KIND_FRONTEND,
+    PROFILE_KIND_UNSET,
     SOURCE_TYPE_ARCHIVE,
     SOURCE_TYPE_DIRECTORY,
     SOURCE_TYPE_FILE,
@@ -34,6 +37,7 @@ def default_backup_name(created_at: str) -> str:
 class DeploymentProfile:
     id: str = field(default_factory=new_id)
     name: str = "New Profile"
+    profile_kind: str = PROFILE_KIND_UNSET
     source_type: str = SOURCE_TYPE_FILE
     source_path: str = ""
     host: str = ""
@@ -71,6 +75,8 @@ class DeploymentProfile:
             if hasattr(profile, key):
                 setattr(profile, key, value)
         profile.post_commands = [cmd for cmd in profile.post_commands if cmd.strip()]
+        if profile.profile_kind not in {PROFILE_KIND_UNSET, PROFILE_KIND_BACKEND, PROFILE_KIND_FRONTEND}:
+            profile.profile_kind = PROFILE_KIND_UNSET
         if profile.port <= 0:
             profile.port = DEFAULT_PORT
         if profile.max_backup_count <= 0:
