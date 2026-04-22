@@ -33,6 +33,7 @@ _GEOMETRY_KEY = "geometry"
 _DEFAULT_LINES = 1000
 _LOAD_MORE_STEP = 1000
 _MAX_LINES = 20000
+_MAX_RECENT_LOCAL_SOURCES = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,7 +248,7 @@ class LogViewerDialog(QDialog):
         self.profile = profile
         self.history = history
         self.current_log_file = current_log_file
-        self.initial_log_file = initial_log_file or self.initial_log_file
+        self.initial_log_file = initial_log_file
         selected_key = self._current_source_key()
         self._sources = self._build_sources()
         self._reload_source_combo(selected_key)
@@ -260,11 +261,6 @@ class LogViewerDialog(QDialog):
         self._append_source(
             sources,
             seen_paths,
-            LogSource("current", f"本次执行日志 | {self._path_name(self.current_log_file)}", self.current_log_file, "local"),
-        )
-        self._append_source(
-            sources,
-            seen_paths,
             LogSource("remote_default", "服务日志 | default.log", self._effective_remote_path("default"), "remote"),
         )
         self._append_source(
@@ -272,19 +268,51 @@ class LogViewerDialog(QDialog):
             seen_paths,
             LogSource("remote_error", "服务日志 | error.log", self._effective_remote_path("error"), "remote"),
         )
-        for record in self.history:
-            if record.profile_id != self.profile.id:
-                continue
-            if not record.log_file:
-                continue
-            status = "成功" if record.success else "失败"
-            label = f"历史 | {record.started_at} | {record.action} | {status}"
-            source = LogSource(f"history:{record.id}", label, record.log_file, "local")
-            self._append_source(sources, seen_paths, source)
-        if self.initial_log_file:
-            source = LogSource("ad_hoc", f"指定日志 | {self._path_name(self.initial_log_file)}", self.initial_log_file, "local")
+        for source in self._build_recent_local_sources():
             self._append_source(sources, seen_paths, source)
         return sources
+
+    def _build_recent_local_sources(self) -> list[LogSource]:
+        recent_sources: list[LogSource] = []
+        seen_paths: set[str] = set()
+        if self.initial_log_file:
+            self._append_source(
+                recent_sources,
+                seen_paths,
+                self._make_local_source(self.initial_log_file),
+            )
+        for record in self.history:
+            if len(recent_sources) >= _MAX_RECENT_LOCAL_SOURCES:
+                break
+            if record.profile_id != self.profile.id or not record.log_file:
+                continue
+            self._append_source(
+                recent_sources,
+                seen_paths,
+                self._make_history_source(record),
+            )
+        return recent_sources
+
+    def _make_local_source(self, path: str) -> LogSource:
+        if path == self.current_log_file:
+            return LogSource("history:current", f"历史 | 当前执行中 | {self._path_name(path)}", path, "local")
+        history_record = next(
+            (
+                record
+                for record in self.history
+                if record.profile_id == self.profile.id and record.log_file == path
+            ),
+            None,
+        )
+        if history_record is not None:
+            return self._make_history_source(history_record)
+        return LogSource("history:initial", f"历史 | {self._path_name(path)}", path, "local")
+
+    @staticmethod
+    def _make_history_source(record: HistoryRecord) -> LogSource:
+        status = "成功" if record.success else "失败"
+        label = f"历史 | {record.started_at} | {record.action} | {status}"
+        return LogSource(f"history:{record.id}", label, record.log_file, "local")
 
     def _append_source(
         self,
@@ -320,7 +348,7 @@ class LogViewerDialog(QDialog):
             for source in self._sources:
                 if source.path == self.initial_log_file:
                     return source.key
-        for candidate in (selected_key, "remote_default", "current", "remote_error"):
+        for candidate in (selected_key, "remote_default", "remote_error"):
             if not candidate:
                 continue
             if any(source.key == candidate for source in self._sources):
@@ -377,8 +405,10 @@ class LogViewerDialog(QDialog):
         if self._worker and self._worker.isRunning():
             if self._worker_request != request:
                 self._status_label.setText("已切换日志来源，当前加载完成后自动刷新")
+                self._set_loading_state(source)
             return
         self._status_label.setText("加载中...")
+        self._set_loading_state(source)
         self._set_fetch_buttons(False)
         self._worker_request = request
         self._worker = LogFetchWorker(self.profile, source, self._line_limit_spin.value())
@@ -488,6 +518,12 @@ class LogViewerDialog(QDialog):
         self._last_result = FilteredLogResult([], 0, 0, 0, 0)
         self._log_area.setPlainText(text)
         self._status_label.setText(text)
+
+    def _set_loading_state(self, source: LogSource) -> None:
+        self._raw_lines = []
+        self._display_text = ""
+        self._last_result = FilteredLogResult([], 0, 0, 0, 0)
+        self._log_area.setPlainText(f"正在加载 {source.label} ...")
 
     def _load_more(self) -> None:
         next_value = min(_MAX_LINES, self._line_limit_spin.value() + _LOAD_MORE_STEP)

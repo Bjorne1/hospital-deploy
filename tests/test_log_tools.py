@@ -61,6 +61,35 @@ class LogToolsTests(unittest.TestCase):
         self.assertEqual(result.matched_lines, 1)
         self.assertEqual(result.skipped_without_time, 1)
 
+    def test_filter_log_lines_supports_bracketed_timestamp_prefix_for_time_filter(self) -> None:
+        lines = [
+            "[2026-04-22 10:00:00] [INFO] hello",
+            "[2026-04-22 10:00:01] [INFO] world",
+        ]
+        result = filter_log_lines(
+            lines,
+            start_time=datetime(2026, 4, 22, 0, 0, 0),
+            end_time=datetime(2026, 4, 22, 23, 59, 59),
+        )
+        self.assertEqual(result.matched_lines, 2)
+        self.assertEqual(result.displayed_lines, 2)
+        self.assertEqual(result.skipped_without_time, 0)
+
+    def test_filter_log_lines_supports_short_timestamp_prefix_for_time_filter(self) -> None:
+        lines = [
+            "04-22 10:00:00 INFO hello",
+            "04-22 10:00:01 INFO world",
+        ]
+        result = filter_log_lines(
+            lines,
+            start_time=datetime(2026, 4, 22, 0, 0, 0),
+            end_time=datetime(2026, 4, 22, 23, 59, 59),
+            now=datetime(2026, 4, 22, 12, 0, 0),
+        )
+        self.assertEqual(result.matched_lines, 2)
+        self.assertEqual(result.displayed_lines, 2)
+        self.assertEqual(result.skipped_without_time, 0)
+
     def test_filter_log_lines_keeps_multiline_event_when_any_line_matches(self) -> None:
         lines = [
             "2026-03-23 10:00:00 SQL start",
@@ -91,6 +120,40 @@ class LogToolsTests(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_log_viewer_limits_sources_to_service_logs_and_recent_three_local_logs(self) -> None:
+        history = [
+            self._history_record("1", r"C:\logs\one.log", "2026-04-22T10:00:00"),
+            self._history_record("2", r"C:\logs\two.log", "2026-04-22T09:00:00"),
+            self._history_record("3", r"C:\logs\three.log", "2026-04-22T08:00:00"),
+            self._history_record("4", r"C:\logs\four.log", "2026-04-22T07:00:00"),
+        ]
+        dialog = LogViewerDialog(
+            profile=DeploymentProfile(id="profile-1", name="demo", host="127.0.0.1", target_path="/srv/app"),
+            history=history,
+            initial_log_file=r"C:\logs\four.log",
+        )
+        try:
+            self.assertEqual([source.key for source in dialog._sources[:2]], ["remote_default", "remote_error"])
+            self.assertEqual(len(dialog._sources), 5)
+            self.assertIn(r"C:\logs\four.log", [source.path for source in dialog._sources])
+            self.assertNotIn(r"C:\logs\three.log", [source.path for source in dialog._sources[2:]])
+        finally:
+            dialog.close()
+
+    def test_refresh_context_clears_previous_initial_log_file(self) -> None:
+        dialog = LogViewerDialog(
+            profile=DeploymentProfile(id="profile-1", name="demo", host="127.0.0.1", target_path="/srv/app"),
+            history=[],
+            initial_log_file=r"C:\logs\initial.log",
+        )
+        try:
+            self.assertEqual(dialog.initial_log_file, r"C:\logs\initial.log")
+            dialog.refresh_context(dialog.profile, [], initial_log_file="", auto_fetch=False)
+            self.assertEqual(dialog.initial_log_file, "")
+            self.assertNotIn(r"C:\logs\initial.log", [source.path for source in dialog._sources])
+        finally:
+            dialog.close()
+
     def test_source_switch_during_loading_refetches_latest_selection(self) -> None:
         class RunningWorkerStub:
             @staticmethod
@@ -101,16 +164,19 @@ class LogToolsTests(unittest.TestCase):
             profile=DeploymentProfile(name="demo", host="127.0.0.1", target_path="/srv/app"),
             history=[],
             current_log_file=r"C:\temp\current.log",
+            initial_log_file=r"C:\temp\current.log",
         )
         try:
-            current_index = dialog._source_combo.findData("current")
+            current_index = dialog._source_combo.findData("history:current")
             dialog._source_combo.blockSignals(True)
             dialog._source_combo.setCurrentIndex(current_index)
             dialog._source_combo.blockSignals(False)
             dialog._update_source_caption()
 
             dialog._worker = RunningWorkerStub()
-            dialog._worker_request = ("current", dialog._line_limit_spin.value())
+            dialog._worker_request = ("history:current", dialog._line_limit_spin.value())
+            dialog._raw_lines = ["2026-03-30 10:00:00 stale"]
+            dialog._apply_filters()
 
             remote_default_index = dialog._source_combo.findData("remote_default")
             dialog._source_combo.setCurrentIndex(remote_default_index)
@@ -122,6 +188,7 @@ class LogToolsTests(unittest.TestCase):
 
             self.assertEqual(refresh_calls, ["remote_default"])
             self.assertEqual(dialog._raw_lines, [])
+            self.assertIn("正在加载 服务日志 | default.log", dialog._log_area.toPlainText())
         finally:
             dialog.close()
 
@@ -182,6 +249,21 @@ class LogToolsTests(unittest.TestCase):
     def test_profile_invalid_kind_falls_back_to_unset(self) -> None:
         profile = DeploymentProfile.from_dict({"name": "broken", "profile_kind": "java"})
         self.assertEqual(profile.profile_kind, PROFILE_KIND_UNSET)
+
+    @staticmethod
+    def _history_record(record_id: str, log_file: str, started_at: str) -> object:
+        from hospital_deploy_tool.models import HistoryRecord
+
+        return HistoryRecord(
+            id=record_id,
+            profile_id="profile-1",
+            profile_name="demo",
+            action="deploy",
+            host="127.0.0.1",
+            log_file=log_file,
+            started_at=started_at,
+            success=True,
+        )
 
 
 if __name__ == "__main__":

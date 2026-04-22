@@ -8,7 +8,9 @@ from pathlib import Path
 
 _FULL_TIMESTAMP_RE = re.compile(r"(\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}:\d{2})")
 _SHORT_TIMESTAMP_RE = re.compile(r"(\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
-_LINE_START_TIMESTAMP_RE = re.compile(r"^\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}:\d{2}")
+_EVENT_START_TIMESTAMP_RE = re.compile(
+    r"^\s*(?:\[?\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?|\[?\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[.,]\d+)?)"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,4 +153,4 @@ def _group_line_events(
 
 
 def _is_event_start(line: str) -> bool:
-    return _LINE_START_TIMESTAMP_RE.search(line) is not None
+    return _EVENT_START_TIMESTAMP_RE.search(line) is not None
