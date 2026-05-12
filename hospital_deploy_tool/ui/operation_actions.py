@@ -143,7 +143,9 @@ class OperationActions:
         }
         summary = self.summary_text(profile)
         if backup_record:
-            summary += f"\n恢复备份: {backup_record.name} ({backup_record.remote_backup_path})"
+            summary += (
+                f"\n恢复备份: {backup_record.display_version_time()} ({backup_record.remote_backup_path})"
+            )
         if action == ACTION_RESTORE_BACKUP:
             summary += f"\n恢复后执行后置命令: {'是' if run_post_commands_after_restore else '否'}"
         buttons = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
@@ -412,7 +414,7 @@ class OperationActions:
         answer = QMessageBox.question(
             self,
             "删除备份",
-            f"确认删除备份“{record.name}”吗？",
+            f"确认删除版本时间为“{record.display_version_time()}”的备份吗？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
@@ -432,9 +434,6 @@ class OperationActions:
         profile: DeploymentProfile,
         record: BackupRecord,
     ) -> None:
-        if not record.name.strip():
-            QMessageBox.warning(self, "保存失败", "备份名称不能为空。")
-            return
         try:
             with RemoteDeployer(profile, _SilentLogger()) as deployer:
                 deployer.save_backup_record(record)

@@ -26,6 +26,7 @@ from .targeting import resolve_file_target
 
 
 ProgressCallback = Callable[[str, int, int, int, int, int, int], None]
+LOCAL_TAR_GZIP_COMPRESSLEVEL = 1
 
 
 @dataclass(slots=True)
@@ -220,14 +221,21 @@ class RemoteDeployer:
             self.logger.info("本地打包目录为 tar.gz...")
             fd, local_tmp = tempfile.mkstemp(suffix=".tar.gz")
             os.close(fd)
-            with tarfile.open(local_tmp, "w:gz") as tar:
-                tar.add(str(source), arcname=".")
+            self.create_directory_archive(source, Path(local_tmp), progress)
             local_archive = Path(local_tmp)
             remote_tmp = posixpath.join("/tmp", f"deploy_compressed_{local_archive.name}")
             self.ensure_dir(target_path)
             self.clear_directory(target_path)
             self.logger.info(f"上传压缩包到远端临时路径 {remote_tmp}")
-            self.sftp_put(local_archive, remote_tmp, 1, 1, 0, local_archive.stat().st_size, progress)
+            self.sftp_put(
+                local_archive,
+                remote_tmp,
+                1,
+                1,
+                0,
+                local_archive.stat().st_size,
+                progress,
+            )
             self.logger.info("远端解压中...")
             self.run_command(
                 f"tar -xzf {shlex.quote(remote_tmp)} -C {shlex.quote(target_path)}"
@@ -237,6 +245,62 @@ class RemoteDeployer:
         finally:
             if local_tmp and Path(local_tmp).exists():
                 Path(local_tmp).unlink()
+
+    def create_directory_archive(
+        self,
+        source: Path,
+        archive_path: Path,
+        progress: ProgressCallback,
+    ) -> None:
+        entries = self.collect_archive_entries(source)
+        files = [item for item in entries if item.is_file()]
+        total_files = len(files)
+        total_bytes = sum(item.stat().st_size for item in files)
+        file_index = 0
+        sent_before = 0
+
+        with tarfile.open(
+            archive_path,
+            "w:gz",
+            compresslevel=LOCAL_TAR_GZIP_COMPRESSLEVEL,
+        ) as tar:
+            for item in entries:
+                arcname = self.archive_arcname(source, item)
+                if not item.is_file():
+                    tar.add(str(item), arcname=arcname, recursive=False)
+                    continue
+
+                file_index += 1
+                file_size = item.stat().st_size
+                progress(
+                    f"打包 {item.name}",
+                    0,
+                    file_size,
+                    sent_before,
+                    total_bytes,
+                    file_index,
+                    total_files,
+                )
+                tar.add(str(item), arcname=arcname, recursive=False)
+                sent_before += file_size
+                progress(
+                    f"打包 {item.name}",
+                    file_size,
+                    file_size,
+                    sent_before,
+                    total_bytes,
+                    file_index,
+                    total_files,
+                )
+
+    def collect_archive_entries(self, source: Path) -> list[Path]:
+        entries = [source, *source.rglob("*")]
+        return sorted(entries, key=lambda item: self.archive_arcname(source, item))
+
+    def archive_arcname(self, source: Path, item: Path) -> str:
+        if item == source:
+            return "."
+        return item.relative_to(source).as_posix()
 
     def run_post_commands(self) -> None:
         commands = [cmd.strip() for cmd in self.profile.post_commands if cmd.strip()]
@@ -430,6 +494,7 @@ class RemoteDeployer:
 
     def make_backup_record(self, remote_path: str, mode: str, target_path: str, size: int = 0) -> BackupRecord:
         created_at = datetime.now().isoformat(timespec="seconds")
+        version_at = self.backup_version_time(target_path, mode)
         return BackupRecord(
             profile_id=self.profile.id,
             profile_name=self.profile.name,
@@ -440,10 +505,42 @@ class RemoteDeployer:
             backup_mode=mode,
             backup_size=size,
             created_at=created_at,
+            version_at=version_at,
             name=default_backup_name(created_at),
             scope_key=self.backup_scope_key(),
             post_commands=list(self.profile.post_commands),
         )
+
+    def backup_version_time(self, target_path: str, mode: str) -> str:
+        if mode == "file":
+            timestamp = self.remote_path_mtime_epoch(target_path)
+        else:
+            timestamp = self.remote_latest_file_mtime_epoch(target_path)
+            if timestamp is None:
+                timestamp = self.remote_path_mtime_epoch(target_path)
+        return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
+    def remote_path_mtime_epoch(self, remote_path: str) -> float:
+        command = f"stat -c %Y -- {shlex.quote(remote_path)}"
+        result = self.run_command(command, check=False)
+        if result.exit_code != 0:
+            raise RuntimeError(result.stderr.strip() or f"无法读取修改时间: {remote_path}")
+        text = result.stdout.strip()
+        if not text:
+            raise RuntimeError(f"无法读取修改时间: {remote_path}")
+        return float(text)
+
+    def remote_latest_file_mtime_epoch(self, remote_path: str) -> float | None:
+        command = (
+            f"find -- {shlex.quote(remote_path)} -type f -printf '%T@\\n' | sort -nr | head -n 1"
+        )
+        result = self.run_command(command, check=False)
+        if result.exit_code != 0:
+            raise RuntimeError(result.stderr.strip() or f"无法读取目录中文件修改时间: {remote_path}")
+        text = result.stdout.strip()
+        if not text:
+            return None
+        return float(text)
 
     def deployed_target_path(self) -> str:
         if self.profile.source_type in {SOURCE_TYPE_DIRECTORY, SOURCE_TYPE_ARCHIVE}:

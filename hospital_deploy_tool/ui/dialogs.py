@@ -31,16 +31,17 @@ class BackupDialog(QDialog):
         self.resize(1180, 620)
         self.table = QTableWidget(0, 8, self)
         self.table.setHorizontalHeaderLabels(
-            ["收藏", "时间", "名称", "描述", "主机", "目标路径", "类型", "大小"]
+            ["收藏", "备份时间", "版本时间", "描述", "主机", "目标路径", "类型", "大小"]
         )
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.itemSelectionChanged.connect(self.fill_details)
-        self.name_edit = QLineEdit(self)
+        self.version_time_edit = QLineEdit(self)
+        self.version_time_edit.setReadOnly(True)
         self.favorite_check = QCheckBox("收藏此备份（不自动清理）", self)
         self.description_edit = QPlainTextEdit(self)
         self.description_edit.setMaximumHeight(100)
-        self.save_meta_button = QPushButton("保存名称/描述", self)
+        self.save_meta_button = QPushButton("保存描述/收藏", self)
         self.save_meta_button.clicked.connect(self.on_save_metadata)
         self.details = QPlainTextEdit(self)
         self.details.setReadOnly(True)
@@ -68,8 +69,8 @@ class BackupDialog(QDialog):
         button_bar.addWidget(self.close_button)
 
         right = QVBoxLayout()
-        right.addWidget(QLabel("备份名称", self))
-        right.addWidget(self.name_edit)
+        right.addWidget(QLabel("版本时间", self))
+        right.addWidget(self.version_time_edit)
         right.addWidget(self.favorite_check)
         right.addWidget(QLabel("描述", self))
         right.addWidget(self.description_edit)
@@ -94,7 +95,7 @@ class BackupDialog(QDialog):
             values = [
                 "是" if record.favorite else "",
                 record.created_at,
-                record.name,
+                record.display_version_time(),
                 self.short_description(record.description),
                 record.host,
                 record.target_path,
@@ -140,11 +141,12 @@ class BackupDialog(QDialog):
             self.clear_details()
             return
         self.set_editor_enabled(True)
-        self.name_edit.setText(record.name)
+        self.version_time_edit.setText(record.display_version_time())
         self.favorite_check.setChecked(record.favorite)
         self.description_edit.setPlainText(record.description)
         lines = [
-            f"时间: {record.created_at}",
+            f"备份时间: {record.created_at}",
+            f"版本时间: {record.display_version_time()}",
             f"Profile: {record.profile_name}",
             f"主机: {record.host}",
             f"目标路径: {record.target_path}",
@@ -174,20 +176,19 @@ class BackupDialog(QDialog):
         if record is None:
             return
         updated = BackupRecord.from_dict(record.to_dict())
-        updated.name = self.name_edit.text().strip() or record.name
         updated.description = self.description_edit.toPlainText().strip()
         updated.favorite = self.favorite_check.isChecked()
         self.metadata_save_requested.emit(updated)
 
     def clear_details(self) -> None:
-        self.name_edit.clear()
+        self.version_time_edit.clear()
         self.description_edit.clear()
         self.favorite_check.setChecked(False)
         self.details.clear()
         self.set_editor_enabled(False)
 
     def set_editor_enabled(self, enabled: bool) -> None:
-        self.name_edit.setEnabled(enabled)
+        self.version_time_edit.setEnabled(enabled)
         self.description_edit.setEnabled(enabled)
         self.favorite_check.setEnabled(enabled)
         self.save_meta_button.setEnabled(enabled)

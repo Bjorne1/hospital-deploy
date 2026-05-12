@@ -98,6 +98,7 @@ class BackupRecord:
     backup_mode: str = ""
     backup_size: int = 0
     created_at: str = field(default_factory=now_iso)
+    version_at: str = ""
     name: str = ""
     description: str = ""
     favorite: bool = False
@@ -115,10 +116,15 @@ class BackupRecord:
             if hasattr(record, key):
                 setattr(record, key, value)
         record.post_commands = [cmd for cmd in record.post_commands if cmd.strip()]
+        if not record.version_at.strip():
+            record.version_at = default_backup_name(record.created_at)
         if not record.name.strip():
             record.name = default_backup_name(record.created_at)
         record.description = record.description or ""
         return record
+
+    def display_version_time(self) -> str:
+        return self.version_at.strip() or default_backup_name(self.created_at)
 
 
 @dataclass(slots=True)

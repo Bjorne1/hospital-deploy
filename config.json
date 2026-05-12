@@ -1,9 +1,10 @@
 {
-  "version": 1,
+  "version": 3,
   "profiles": [
     {
       "id": "8c1249e759b74f10ad92b5938128cdad",
       "name": "默认配置",
+      "profile_kind": "unset",
       "source_type": "file",
       "source_path": "",
       "host": "192.169.10.204",
