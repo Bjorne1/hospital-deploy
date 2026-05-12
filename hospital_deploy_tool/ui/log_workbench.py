@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import posixpath
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ from PySide2.QtGui import QFont, QTextCursor
 from PySide2.QtWidgets import (
     QApplication,
     QCheckBox,
+    QButtonGroup,
     QComboBox,
     QDateTimeEdit,
     QDialog,
@@ -33,7 +35,12 @@ _GEOMETRY_KEY = "geometry"
 _DEFAULT_LINES = 1000
 _LOAD_MORE_STEP = 1000
 _MAX_LINES = 20000
-_MAX_RECENT_LOCAL_SOURCES = 3
+_SERVICE_LOG_SPECS = (
+    ("info", "info.log"),
+    ("error", "error.log"),
+    ("debug", "debug.log"),
+    ("warn", "warn.log"),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +108,10 @@ class LogViewerDialog(QDialog):
         self.history = history
         self.current_log_file = current_log_file
         self.initial_log_file = initial_log_file
-        self._sources: list[LogSource] = []
+        self._sources: dict[str, LogSource] = {}
+        self._source_buttons: dict[str, QPushButton] = {}
+        self._source_button_group: QButtonGroup | None = None
+        self._direct_source: LogSource | None = None
         self._worker: LogFetchWorker | None = None
         self._raw_lines: list[str] = []
         self._display_text = ""
@@ -134,13 +144,19 @@ class LogViewerDialog(QDialog):
 
     def _build_source_bar(self) -> QHBoxLayout:
         row = QHBoxLayout()
-        self._source_combo = QComboBox(self)
-        self._source_combo.currentIndexChanged.connect(self._on_source_changed)
+        self._source_button_group = QButtonGroup(self)
+        self._source_button_group.setExclusive(True)
         self._path_label = QLabel("-", self)
         self._path_label.setProperty("role", "muted")
         self._path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         row.addWidget(QLabel("日志来源", self))
-        row.addWidget(self._source_combo, 2)
+        for key, filename in _SERVICE_LOG_SPECS:
+            button = QPushButton(filename, self)
+            button.setCheckable(True)
+            button.clicked.connect(lambda _checked=False, source_key=key: self._on_source_button_clicked(source_key))
+            self._source_button_group.addButton(button)
+            self._source_buttons[key] = button
+            row.addWidget(button)
         row.addWidget(self._path_label, 5)
         return row
 
@@ -150,6 +166,8 @@ class LogViewerDialog(QDialog):
         self._include_edit.setPlaceholderText("包含关键字")
         self._exclude_edit = QLineEdit(self)
         self._exclude_edit.setPlaceholderText("排除关键字")
+        self._trace_id_edit = QLineEdit(self)
+        self._trace_id_edit.setPlaceholderText("traceId")
         self._case_check = QCheckBox("区分大小写", self)
         self._context_spin = QSpinBox(self)
         self._context_spin.setRange(0, 20)
@@ -160,12 +178,14 @@ class LogViewerDialog(QDialog):
         row.addWidget(QLabel("筛选", self))
         row.addWidget(self._include_edit, 2)
         row.addWidget(self._exclude_edit, 2)
+        row.addWidget(self._trace_id_edit, 2)
         row.addWidget(self._case_check)
         row.addWidget(QLabel("上下文", self))
         row.addWidget(self._context_spin)
         row.addWidget(self._unescape_newline_check)
         self._include_edit.textChanged.connect(self._apply_filters)
         self._exclude_edit.textChanged.connect(self._apply_filters)
+        self._trace_id_edit.textChanged.connect(self._apply_filters)
         self._case_check.toggled.connect(self._apply_filters)
         self._context_spin.valueChanged.connect(self._apply_filters)
         self._unescape_newline_check.toggled.connect(self._apply_filters)
@@ -249,123 +269,57 @@ class LogViewerDialog(QDialog):
         self.history = history
         self.current_log_file = current_log_file
         self.initial_log_file = initial_log_file
+        self._direct_source = self._make_direct_source(initial_log_file)
         selected_key = self._current_source_key()
         self._sources = self._build_sources()
-        self._reload_source_combo(selected_key)
+        self._reload_source_buttons(selected_key)
         if auto_fetch:
             self._fetch_current()
 
-    def _build_sources(self) -> list[LogSource]:
-        sources: list[LogSource] = []
-        seen_paths: set[str] = set()
-        self._append_source(
-            sources,
-            seen_paths,
-            LogSource("remote_default", "服务日志 | default.log", self._effective_remote_path("default"), "remote"),
-        )
-        self._append_source(
-            sources,
-            seen_paths,
-            LogSource("remote_error", "服务日志 | error.log", self._effective_remote_path("error"), "remote"),
-        )
-        for source in self._build_recent_local_sources():
-            self._append_source(sources, seen_paths, source)
-        return sources
+    def _build_sources(self) -> dict[str, LogSource]:
+        return {
+            key: LogSource(key, f"服务日志 | {filename}", self._effective_remote_path(key), "remote")
+            for key, filename in _SERVICE_LOG_SPECS
+        }
 
-    def _build_recent_local_sources(self) -> list[LogSource]:
-        recent_sources: list[LogSource] = []
-        seen_paths: set[str] = set()
-        if self.initial_log_file:
-            self._append_source(
-                recent_sources,
-                seen_paths,
-                self._make_local_source(self.initial_log_file),
-            )
-        for record in self.history:
-            if len(recent_sources) >= _MAX_RECENT_LOCAL_SOURCES:
-                break
-            if record.profile_id != self.profile.id or not record.log_file:
-                continue
-            self._append_source(
-                recent_sources,
-                seen_paths,
-                self._make_history_source(record),
-            )
-        return recent_sources
+    def _make_direct_source(self, path: str) -> LogSource | None:
+        if not path:
+            return None
+        return LogSource(f"history:{path}", f"历史日志 | {self._path_name(path)}", path, "local")
 
-    def _make_local_source(self, path: str) -> LogSource:
-        if path == self.current_log_file:
-            return LogSource("history:current", f"历史 | 当前执行中 | {self._path_name(path)}", path, "local")
-        history_record = next(
-            (
-                record
-                for record in self.history
-                if record.profile_id == self.profile.id and record.log_file == path
-            ),
-            None,
-        )
-        if history_record is not None:
-            return self._make_history_source(history_record)
-        return LogSource("history:initial", f"历史 | {self._path_name(path)}", path, "local")
-
-    @staticmethod
-    def _make_history_source(record: HistoryRecord) -> LogSource:
-        status = "成功" if record.success else "失败"
-        label = f"历史 | {record.started_at} | {record.action} | {status}"
-        return LogSource(f"history:{record.id}", label, record.log_file, "local")
-
-    def _append_source(
-        self,
-        sources: list[LogSource],
-        seen_paths: set[str],
-        source: LogSource,
-    ) -> None:
-        if not source.path:
-            return
-        if source.path in seen_paths:
-            return
-        seen_paths.add(source.path)
-        sources.append(source)
-
-    def _reload_source_combo(self, selected_key: str | None) -> None:
+    def _reload_source_buttons(self, selected_key: str | None) -> None:
         preferred_key = self._resolve_preferred_key(selected_key)
-        self._source_combo.blockSignals(True)
-        self._source_combo.clear()
-        selected_index = -1
-        for index, source in enumerate(self._sources):
-            self._source_combo.addItem(source.label, source.key)
-            if source.key == preferred_key:
-                selected_index = index
-        if selected_index >= 0:
-            self._source_combo.setCurrentIndex(selected_index)
-        elif self._sources:
-            self._source_combo.setCurrentIndex(0)
-        self._source_combo.blockSignals(False)
+        if self._direct_source is not None:
+            preferred_key = None
+        for key, button in self._source_buttons.items():
+            button.blockSignals(True)
+            button.setChecked(key == preferred_key)
+            button.blockSignals(False)
         self._update_source_caption()
 
     def _resolve_preferred_key(self, selected_key: str | None) -> str | None:
-        if self.initial_log_file:
-            for source in self._sources:
-                if source.path == self.initial_log_file:
-                    return source.key
-        for candidate in (selected_key, "remote_default", "remote_error"):
+        if self._direct_source is not None:
+            return None
+        for candidate in (selected_key, "info", "error", "debug", "warn"):
             if not candidate:
                 continue
-            if any(source.key == candidate for source in self._sources):
+            if candidate in self._sources:
                 return candidate
-        return self._sources[0].key if self._sources else None
+        return next(iter(self._sources), None)
 
     def _current_source_key(self) -> str | None:
-        if self._source_combo.count() == 0:
-            return None
-        return str(self._source_combo.currentData())
+        if self._direct_source is not None:
+            return self._direct_source.key
+        for key, button in self._source_buttons.items():
+            if button.isChecked():
+                return key
+        return None
 
     def _current_source(self) -> LogSource | None:
+        if self._direct_source is not None:
+            return self._direct_source
         key = self._current_source_key()
-        for source in self._sources:
-            if source.key == key:
-                return source
-        return None
+        return self._sources.get(key) if key else None
 
     def _current_request(self) -> tuple[str, int] | None:
         source = self._current_source()
@@ -373,29 +327,37 @@ class LogViewerDialog(QDialog):
             return None
         return source.key, self._line_limit_spin.value()
 
-    def _on_source_changed(self) -> None:
+    def _on_source_button_clicked(self, source_key: str) -> None:
+        self._direct_source = None
         self._update_source_caption()
         self._fetch_current()
 
     def _update_source_caption(self) -> None:
         source = self._current_source()
-        self._path_label.setText(source.path if source else "当前没有可读取的日志来源")
+        self._path_label.setText(source.path if source and source.path else "当前没有可读取的日志来源")
         is_remote = bool(source and source.source_type == "remote")
         self._config_button.setEnabled(is_remote)
 
     def _effective_remote_path(self, kind: str) -> str:
         base = self.profile.target_path.rstrip("/")
-        if kind == "default":
+        if kind == "info":
             if self.profile.log_path_default:
-                return self.profile.log_path_default
-            return f"{base}/logs/default.log" if base else ""
-        if self.profile.log_path_error:
-            return self.profile.log_path_error
-        return f"{base}/logs/error.log" if base else ""
+                return self._service_log_path_from_config(self.profile.log_path_default, "info.log")
+            return f"{base}/logs/info.log" if base else ""
+        if kind == "error":
+            if self.profile.log_path_error:
+                return self._service_log_path_from_config(self.profile.log_path_error, "error.log")
+            return f"{base}/logs/error.log" if base else ""
+        if kind in {"debug", "warn"}:
+            default_path = self._effective_remote_path("info")
+            if default_path:
+                return self._sibling_log_path(default_path, f"{kind}.log")
+            return f"{base}/logs/{kind}.log" if base else ""
+        return ""
 
     def _fetch_current(self) -> None:
         source = self._current_source()
-        if source is None:
+        if source is None or not source.path:
             self._set_empty_state("当前没有可读取的日志来源")
             return
         request = self._current_request()
@@ -460,6 +422,7 @@ class LogViewerDialog(QDialog):
             self._raw_lines,
             include_keyword=self._include_edit.text(),
             exclude_keyword=self._exclude_edit.text(),
+            trace_id_keyword=self._trace_id_edit.text(),
             case_sensitive=self._case_check.isChecked(),
             start_time=start_time,
             end_time=end_time,
@@ -520,10 +483,12 @@ class LogViewerDialog(QDialog):
         self._status_label.setText(text)
 
     def _set_loading_state(self, source: LogSource) -> None:
-        self._raw_lines = []
-        self._display_text = ""
-        self._last_result = FilteredLogResult([], 0, 0, 0, 0)
-        self._log_area.setPlainText(f"正在加载 {source.label} ...")
+        message = f"正在加载 {source.label}（最近 {self._line_limit_spin.value()} 行）..."
+        self._status_label.setText(message)
+        if not self._raw_lines:
+            self._last_result = FilteredLogResult([], 0, 0, 0, 0)
+            self._display_text = message
+            self._log_area.setPlainText(self._display_text)
 
     def _load_more(self) -> None:
         next_value = min(_MAX_LINES, self._line_limit_spin.value() + _LOAD_MORE_STEP)
@@ -557,7 +522,7 @@ class LogViewerDialog(QDialog):
 
     def _open_config(self) -> None:
         dialog = LogPathConfigDialog(
-            self.profile.log_path_default or self._effective_remote_path("default"),
+            self.profile.log_path_default or self._effective_remote_path("info"),
             self.profile.log_path_error or self._effective_remote_path("error"),
             self,
         )
@@ -625,3 +590,17 @@ class LogViewerDialog(QDialog):
     @staticmethod
     def _path_name(path: str) -> str:
         return Path(path).name if path else "-"
+
+    @staticmethod
+    def _sibling_log_path(path: str, filename: str) -> str:
+        parent = posixpath.dirname(path.rstrip("/"))
+        if not parent:
+            return filename
+        return posixpath.join(parent, filename)
+
+    @classmethod
+    def _service_log_path_from_config(cls, path: str, filename: str) -> str:
+        basename = posixpath.basename(path.strip())
+        if basename == "default.log":
+            return cls._sibling_log_path(path, filename)
+        return path

@@ -80,6 +80,7 @@ def filter_log_lines(
     lines: list[str],
     include_keyword: str = "",
     exclude_keyword: str = "",
+    trace_id_keyword: str = "",
     case_sensitive: bool = False,
     start_time: datetime | None = None,
     end_time: datetime | None = None,
@@ -88,9 +89,11 @@ def filter_log_lines(
 ) -> FilteredLogResult:
     include = include_keyword.strip()
     exclude = exclude_keyword.strip()
+    trace_id = trace_id_keyword.strip()
     use_time = start_time is not None or end_time is not None
     normalized_include = include if case_sensitive else include.lower()
     normalized_exclude = exclude if case_sensitive else exclude.lower()
+    normalized_trace_id = trace_id if case_sensitive else trace_id.lower()
     matched_indexes: list[int] = []
     skipped_without_time = 0
     for start, end, event_time in _group_line_events(lines, now):
@@ -100,6 +103,8 @@ def filter_log_lines(
         if normalized_include and normalized_include not in probe:
             continue
         if normalized_exclude and normalized_exclude in probe:
+            continue
+        if normalized_trace_id and normalized_trace_id not in probe:
             continue
         if use_time:
             if event_time is None:

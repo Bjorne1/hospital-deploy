@@ -103,6 +103,25 @@ class LogToolsTests(unittest.TestCase):
         self.assertEqual(result.lines[0], "2026-03-23 10:00:00 SQL start")
         self.assertEqual(result.lines[-1], "FROM t WHERE id = 1")
 
+    def test_filter_log_lines_supports_trace_id_keyword(self) -> None:
+        lines = [
+            '2026-05-12 09:15:12.070 [a59332102fba437bb6db917fdc4646d1] INFO  demo traceId=a59332102fba437bb6db917fdc4646d1',
+            '2026-05-12 09:15:13.070 [11111111111111111111111111111111] INFO  demo traceId=11111111111111111111111111111111',
+        ]
+        result = filter_log_lines(lines, trace_id_keyword="a59332102fba437bb6db917fdc4646d1")
+        self.assertEqual(result.matched_lines, 1)
+        self.assertEqual(result.displayed_lines, 1)
+        self.assertIn("a59332102fba437bb6db917fdc4646d1", result.lines[0])
+
+    def test_filter_log_lines_supports_trace_id_in_brackets(self) -> None:
+        lines = [
+            '2026-05-12 09:15:12.070 [a59332102fba437bb6db917fdc4646d1] INFO demo',
+            '2026-05-12 09:15:13.070 [11111111111111111111111111111111] INFO demo',
+        ]
+        result = filter_log_lines(lines, trace_id_keyword="a59332102fba437bb6db917fdc4646d1")
+        self.assertEqual(result.matched_lines, 1)
+        self.assertEqual(result.displayed_lines, 1)
+
     def test_read_local_tail_returns_last_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = Path(tmp_dir) / "demo.log"
@@ -116,11 +135,26 @@ class LogToolsTests(unittest.TestCase):
             current_log_file=r"C:\temp\current.log",
         )
         try:
-            self.assertEqual(dialog._current_source_key(), "remote_default")
+            self.assertEqual(dialog._current_source_key(), "info")
         finally:
             dialog.close()
 
-    def test_log_viewer_limits_sources_to_service_logs_and_recent_three_local_logs(self) -> None:
+    def test_log_viewer_normalizes_legacy_default_log_path_to_info_log(self) -> None:
+        dialog = LogViewerDialog(
+            profile=DeploymentProfile(
+                name="demo",
+                host="127.0.0.1",
+                target_path="/srv/app",
+                log_path_default="/srv/app/logs/default.log",
+            ),
+            history=[],
+        )
+        try:
+            self.assertEqual(dialog._sources["info"].path, "/srv/app/logs/info.log")
+        finally:
+            dialog.close()
+
+    def test_log_viewer_limits_sources_to_four_service_logs(self) -> None:
         history = [
             self._history_record("1", r"C:\logs\one.log", "2026-04-22T10:00:00"),
             self._history_record("2", r"C:\logs\two.log", "2026-04-22T09:00:00"),
@@ -130,13 +164,37 @@ class LogToolsTests(unittest.TestCase):
         dialog = LogViewerDialog(
             profile=DeploymentProfile(id="profile-1", name="demo", host="127.0.0.1", target_path="/srv/app"),
             history=history,
-            initial_log_file=r"C:\logs\four.log",
         )
         try:
-            self.assertEqual([source.key for source in dialog._sources[:2]], ["remote_default", "remote_error"])
-            self.assertEqual(len(dialog._sources), 5)
-            self.assertIn(r"C:\logs\four.log", [source.path for source in dialog._sources])
-            self.assertNotIn(r"C:\logs\three.log", [source.path for source in dialog._sources[2:]])
+            self.assertEqual(list(dialog._sources), ["info", "error", "debug", "warn"])
+            self.assertEqual([source.label for source in dialog._sources.values()], [
+                "服务日志 | info.log",
+                "服务日志 | error.log",
+                "服务日志 | debug.log",
+                "服务日志 | warn.log",
+            ])
+            self.assertEqual([source.path for source in dialog._sources.values()], [
+                "/srv/app/logs/info.log",
+                "/srv/app/logs/error.log",
+                "/srv/app/logs/debug.log",
+                "/srv/app/logs/warn.log",
+            ])
+            self.assertEqual(len(dialog._source_buttons), 4)
+            self.assertEqual(dialog._current_source_key(), "info")
+        finally:
+            dialog.close()
+
+    def test_log_viewer_can_open_initial_history_log_without_adding_it_to_sources(self) -> None:
+        dialog = LogViewerDialog(
+            profile=DeploymentProfile(id="profile-1", name="demo", host="127.0.0.1", target_path="/srv/app"),
+            history=[],
+            initial_log_file=r"C:\logs\initial.log",
+        )
+        try:
+            self.assertEqual(dialog._current_source_key(), r"history:C:\logs\initial.log")
+            self.assertEqual(dialog._current_source().path, r"C:\logs\initial.log")
+            self.assertEqual(list(dialog._sources), ["info", "error", "debug", "warn"])
+            self.assertFalse(any(button.isChecked() for button in dialog._source_buttons.values()))
         finally:
             dialog.close()
 
@@ -150,7 +208,7 @@ class LogToolsTests(unittest.TestCase):
             self.assertEqual(dialog.initial_log_file, r"C:\logs\initial.log")
             dialog.refresh_context(dialog.profile, [], initial_log_file="", auto_fetch=False)
             self.assertEqual(dialog.initial_log_file, "")
-            self.assertNotIn(r"C:\logs\initial.log", [source.path for source in dialog._sources])
+            self.assertNotIn(r"C:\logs\initial.log", [source.path for source in dialog._sources.values()])
         finally:
             dialog.close()
 
@@ -167,28 +225,23 @@ class LogToolsTests(unittest.TestCase):
             initial_log_file=r"C:\temp\current.log",
         )
         try:
-            current_index = dialog._source_combo.findData("history:current")
-            dialog._source_combo.blockSignals(True)
-            dialog._source_combo.setCurrentIndex(current_index)
-            dialog._source_combo.blockSignals(False)
-            dialog._update_source_caption()
-
             dialog._worker = RunningWorkerStub()
-            dialog._worker_request = ("history:current", dialog._line_limit_spin.value())
+            dialog._worker_request = ("info", dialog._line_limit_spin.value())
             dialog._raw_lines = ["2026-03-30 10:00:00 stale"]
+            dialog._display_text = "2026-03-30 10:00:00 stale"
             dialog._apply_filters()
 
-            remote_default_index = dialog._source_combo.findData("remote_default")
-            dialog._source_combo.setCurrentIndex(remote_default_index)
+            dialog._source_buttons["error"].setChecked(True)
+            dialog._on_source_button_clicked("error")
 
             refresh_calls: list[str | None] = []
             dialog._fetch_current = lambda: refresh_calls.append(dialog._current_source_key())  # type: ignore[method-assign]
 
             dialog._on_fetch_done("2026-03-30 10:00:00 stale")
 
-            self.assertEqual(refresh_calls, ["remote_default"])
-            self.assertEqual(dialog._raw_lines, [])
-            self.assertIn("正在加载 服务日志 | default.log", dialog._log_area.toPlainText())
+            self.assertEqual(refresh_calls, ["error"])
+            self.assertEqual(dialog._raw_lines, ["2026-03-30 10:00:00 stale"])
+            self.assertIn("2026-03-30 10:00:00 stale", dialog._log_area.toPlainText())
         finally:
             dialog.close()
 

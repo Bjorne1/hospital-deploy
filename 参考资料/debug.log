@@ -1,0 +1,68 @@
+2026-05-12 09:10:51.600 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,hospital_id,app_code,app_id,app_name,app_type,client_type,app_description,public_key,private_key,active,create_time,create_by,update_time,update_by,remark,del FROM coze_oauth_app WHERE del=0
+2026-05-12 09:10:51.626 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 
+2026-05-12 09:10:51.639 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 0
+2026-05-12 09:10:51.655 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,hospital_id,workflow_code,workflow_id,workflow_name,workflow_type,workflow_params,app_id,bot_id,permission_point,description,active,create_time,create_by,update_time,update_by,remark,del FROM coze_workflow WHERE del=0
+2026-05-12 09:10:51.655 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 
+2026-05-12 09:10:51.657 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 0
+2026-05-12 09:10:51.685 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,hospital_id,app_code,app_id,workflow_id,app_name,app_type,app_description,app_params,api_key,active,create_time,create_by,update_time,update_by,remark,del FROM dify_app WHERE del=0
+2026-05-12 09:10:51.686 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 
+2026-05-12 09:10:51.704 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 17
+2026-05-12 09:10:51.761 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,dify_app_id,node_llm_name,llm_name,sys_prompt_code,user_prompt_code,active,create_time,create_by,update_time,update_by,remark,del FROM dify_app_prompt t WHERE t.del=0 AND (t.dify_app_id = ? AND t.active = ?)
+2026-05-12 09:10:51.763 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 1931190602716934100(String), 1(String)
+2026-05-12 09:10:51.765 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 0
+2026-05-12 09:10:51.876 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,dify_app_id,node_llm_name,llm_name,sys_prompt_code,user_prompt_code,active,create_time,create_by,update_time,update_by,remark,del FROM dify_app_prompt t WHERE t.del=0 AND (t.dify_app_id = ? AND t.active = ?)
+2026-05-12 09:10:51.876 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 1931190602716934101(String), 1(String)
+2026-05-12 09:10:51.879 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 0
+2026-05-12 09:10:51.883 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,dify_app_id,node_llm_name,llm_name,sys_prompt_code,user_prompt_code,active,create_time,create_by,update_time,update_by,remark,del FROM dify_app_prompt t WHERE t.del=0 AND (t.dify_app_id = ? AND t.active = ?)
+2026-05-12 09:10:51.883 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 1931190602716934102(String), 1(String)
+2026-05-12 09:10:51.885 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 1
+2026-05-12 09:10:51.895 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,dify_app_id,node_llm_name,llm_name,sys_prompt_code,user_prompt_code,active,create_time,create_by,update_time,update_by,remark,del FROM dify_app_prompt t WHERE t.del=0 AND (t.dify_app_id = ? AND t.active = ?)
+2026-05-12 09:10:51.896 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 1931190602716934103(String), 1(String)
+2026-05-12 09:10:51.897 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 0
+2026-05-12 09:10:51.901 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,dify_app_id,node_llm_name,llm_name,sys_prompt_code,user_prompt_code,active,create_time,create_by,update_time,update_by,remark,del FROM dify_app_prompt t WHERE t.del=0 AND (t.dify_app_id = ? AND t.active = ?)
+2026-05-12 09:10:51.902 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 1931190602716934104(String), 1(String)
+2026-05-12 09:10:51.904 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 0
+2026-05-12 09:10:51.908 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,dify_app_id,node_llm_name,llm_name,sys_prompt_code,user_prompt_code,active,create_time,create_by,update_time,update_by,remark,del FROM dify_app_prompt t WHERE t.del=0 AND (t.dify_app_id = ? AND t.active = ?)
+2026-05-12 09:10:51.908 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 1931190602716934105(String), 1(String)
+2026-05-12 09:10:51.910 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 1
+2026-05-12 09:10:51.913 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,dify_app_id,node_llm_name,llm_name,sys_prompt_code,user_prompt_code,active,create_time,create_by,update_time,update_by,remark,del FROM dify_app_prompt t WHERE t.del=0 AND (t.dify_app_id = ? AND t.active = ?)
+2026-05-12 09:10:51.915 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 1931190602716934106(String), 1(String)
+2026-05-12 09:10:51.917 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 1
+2026-05-12 09:10:51.920 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,dify_app_id,node_llm_name,llm_name,sys_prompt_code,user_prompt_code,active,create_time,create_by,update_time,update_by,remark,del FROM dify_app_prompt t WHERE t.del=0 AND (t.dify_app_id = ? AND t.active = ?)
+2026-05-12 09:10:51.923 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 1931190602716934107(String), 1(String)
+2026-05-12 09:10:51.935 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 4
+2026-05-12 09:10:51.940 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,dify_app_id,node_llm_name,llm_name,sys_prompt_code,user_prompt_code,active,create_time,create_by,update_time,update_by,remark,del FROM dify_app_prompt t WHERE t.del=0 AND (t.dify_app_id = ? AND t.active = ?)
+2026-05-12 09:10:51.941 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 1931190602716934110(String), 1(String)
+2026-05-12 09:10:51.942 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 3
+2026-05-12 09:10:51.945 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,dify_app_id,node_llm_name,llm_name,sys_prompt_code,user_prompt_code,active,create_time,create_by,update_time,update_by,remark,del FROM dify_app_prompt t WHERE t.del=0 AND (t.dify_app_id = ? AND t.active = ?)
+2026-05-12 09:10:51.946 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 1931190602716934111(String), 1(String)
+2026-05-12 09:10:51.948 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 1
+2026-05-12 09:10:51.956 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,dify_app_id,node_llm_name,llm_name,sys_prompt_code,user_prompt_code,active,create_time,create_by,update_time,update_by,remark,del FROM dify_app_prompt t WHERE t.del=0 AND (t.dify_app_id = ? AND t.active = ?)
+2026-05-12 09:10:51.956 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 1931190602716934112(String), 1(String)
+2026-05-12 09:10:51.957 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 1
+2026-05-12 09:10:51.960 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,dify_app_id,node_llm_name,llm_name,sys_prompt_code,user_prompt_code,active,create_time,create_by,update_time,update_by,remark,del FROM dify_app_prompt t WHERE t.del=0 AND (t.dify_app_id = ? AND t.active = ?)
+2026-05-12 09:10:51.960 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 1931190602716934113(String), 1(String)
+2026-05-12 09:10:51.961 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 1
+2026-05-12 09:10:51.965 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,dify_app_id,node_llm_name,llm_name,sys_prompt_code,user_prompt_code,active,create_time,create_by,update_time,update_by,remark,del FROM dify_app_prompt t WHERE t.del=0 AND (t.dify_app_id = ? AND t.active = ?)
+2026-05-12 09:10:51.966 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 1931190602716934114(String), 1(String)
+2026-05-12 09:10:51.968 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 1
+2026-05-12 09:10:51.972 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,dify_app_id,node_llm_name,llm_name,sys_prompt_code,user_prompt_code,active,create_time,create_by,update_time,update_by,remark,del FROM dify_app_prompt t WHERE t.del=0 AND (t.dify_app_id = ? AND t.active = ?)
+2026-05-12 09:10:51.972 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 1931190602716934115(String), 1(String)
+2026-05-12 09:10:51.975 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 4
+2026-05-12 09:10:51.977 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,dify_app_id,node_llm_name,llm_name,sys_prompt_code,user_prompt_code,active,create_time,create_by,update_time,update_by,remark,del FROM dify_app_prompt t WHERE t.del=0 AND (t.dify_app_id = ? AND t.active = ?)
+2026-05-12 09:10:51.978 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 1931190602716934116(String), 1(String)
+2026-05-12 09:10:51.981 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 1
+2026-05-12 09:10:51.990 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,dify_app_id,node_llm_name,llm_name,sys_prompt_code,user_prompt_code,active,create_time,create_by,update_time,update_by,remark,del FROM dify_app_prompt t WHERE t.del=0 AND (t.dify_app_id = ? AND t.active = ?)
+2026-05-12 09:10:51.990 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 1931190602716934117(String), 1(String)
+2026-05-12 09:10:51.994 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 1
+2026-05-12 09:10:52.006 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,dify_app_id,node_llm_name,llm_name,sys_prompt_code,user_prompt_code,active,create_time,create_by,update_time,update_by,remark,del FROM dify_app_prompt t WHERE t.del=0 AND (t.dify_app_id = ? AND t.active = ?)
+2026-05-12 09:10:52.007 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 1931190602716934118(String), 1(String)
+2026-05-12 09:10:52.009 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 1
+2026-05-12 09:10:52.025 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==>  Preparing: SELECT id,prompt_code,prompt_name,prompt_type,prompt_content,version,active,create_time,create_by,update_time,update_by,remark,del FROM ai_prompt t WHERE t.del=0 AND (t.active = ?)
+2026-05-12 09:10:52.025 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - ==> Parameters: 1(String)
+2026-05-12 09:10:52.039 [] [main] DEBUG org.apache.ibatis.logging.jdbc.BaseJdbcLogger.debug:135 - <==      Total: 33
+2026-05-12 09:14:59.455 [3921e1281a734cbfbf8cb9a9038a515c] [http-nio-19087-exec-4] DEBUG feign.slf4j.Slf4jLogger.log:72 - [LogClient#saveLog] ---> POST http://log-service/log/v1/save HTTP/1.1
+2026-05-12 09:15:00.089 [3921e1281a734cbfbf8cb9a9038a515c] [http-nio-19087-exec-4] DEBUG feign.slf4j.Slf4jLogger.log:72 - [LogClient#saveLog] <--- HTTP/1.1 200 (631ms)
+2026-05-12 09:15:12.071 [a59332102fba437bb6db917fdc4646d1] [http-nio-19087-exec-1] DEBUG feign.slf4j.Slf4jLogger.log:72 - [LogClient#saveLog] ---> POST http://log-service/log/v1/save HTTP/1.1
+2026-05-12 09:15:12.078 [a59332102fba437bb6db917fdc4646d1] [http-nio-19087-exec-1] DEBUG feign.slf4j.Slf4jLogger.log:72 - [LogClient#saveLog] <--- HTTP/1.1 200 (6ms)
+2026-05-12 09:15:23.252 [a59332102fba437bb6db917fdc4646d1] [task-6] DEBUG com.whxx.ai.manager.DifyManager.parseSseEvent:558 - 【Dify 对话流】 收到 Dify 心跳事件
