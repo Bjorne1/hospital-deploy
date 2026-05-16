@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import posixpath
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -23,24 +24,31 @@ from PySide2.QtWidgets import (
     QPushButton,
     QSpinBox,
     QVBoxLayout,
+    QWidget,
 )
 
 from ..constants import APP_NAME
-from ..log_tools import FilteredLogResult, filter_log_lines, read_local_tail, resolve_time_range
+from ..log_tools import FilteredLogResult, filter_log_lines, group_line_events, read_local_text, resolve_time_range
 from ..models import DeploymentProfile, HistoryRecord
 from .log_aux_dialogs import LogPathConfigDialog
 
 _SETTINGS_GROUP = "log_workbench"
 _GEOMETRY_KEY = "geometry"
-_DEFAULT_LINES = 1000
-_LOAD_MORE_STEP = 1000
-_MAX_LINES = 20000
 _SERVICE_LOG_SPECS = (
+    ("all", "所有日志"),
     ("info", "info.log"),
     ("error", "error.log"),
     ("debug", "debug.log"),
     ("warn", "warn.log"),
 )
+_SERVICE_LOG_FILENAMES = {
+    "info": "info.log",
+    "error": "error.log",
+    "debug": "debug.log",
+    "warn": "warn.log",
+}
+_AGGREGATE_SOURCE_KEY = "all"
+_CACHE_ROOT_NAME = "hospital-deploy-log-workbench"
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +57,13 @@ class LogSource:
     label: str
     path: str
     source_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class LogFetchResult:
+    text: str
+    local_path: str
+    updated_at: datetime
 
 
 class _NullLogger:
@@ -66,30 +81,133 @@ class _NullLogger:
 
 
 class LogFetchWorker(QThread):
-    finished = Signal(str)
+    finished = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, profile: DeploymentProfile, source: LogSource, line_limit: int) -> None:
+    def __init__(self, profile: DeploymentProfile, source: LogSource) -> None:
         super().__init__()
         self.profile = profile
         self.source = source
-        self.line_limit = line_limit
 
     def run(self) -> None:
         try:
             if self.source.source_type == "local":
-                text = read_local_tail(self.source.path, self.line_limit)
+                result = self._read_local_source()
             else:
-                text = self._read_remote_tail()
-            self.finished.emit(text)
+                result = self._download_remote_source()
+            self.finished.emit(result)
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
 
-    def _read_remote_tail(self) -> str:
+    def _read_local_source(self) -> LogFetchResult:
+        text = read_local_text(self.source.path)
+        updated_at = datetime.fromtimestamp(Path(self.source.path).stat().st_mtime)
+        return LogFetchResult(text=text, local_path=self.source.path, updated_at=updated_at)
+
+    def _download_remote_source(self) -> LogFetchResult:
         from ..remote import RemoteDeployer
 
         with RemoteDeployer(self.profile, _NullLogger()) as deployer:
-            return deployer.read_remote_log(self.source.path, lines=self.line_limit)
+            if self.source.key == _AGGREGATE_SOURCE_KEY:
+                return self._download_aggregate_logs(deployer)
+            return self._download_single_remote_log(deployer, self.source)
+
+    def _download_single_remote_log(self, deployer, source: LogSource) -> LogFetchResult:  # noqa: ANN001
+        size = deployer.remote_size(source.path)
+        local_path = self._single_cache_path(source.key)
+        deployer.download_remote_file(source.path, str(local_path))
+        text = read_local_text(str(local_path))
+        updated_at = self._resolve_updated_at(local_path)
+        if size == 0 and text:
+            size = len(text.encode("utf-8"))
+        return LogFetchResult(text=text, local_path=str(local_path), updated_at=updated_at)
+
+    def _download_aggregate_logs(self, deployer) -> LogFetchResult:  # noqa: ANN001
+        source_files: list[tuple[str, Path]] = []
+        updated_candidates: list[datetime] = []
+        for key in _SERVICE_LOG_FILENAMES:
+            remote_path = self._effective_remote_path(key)
+            if not remote_path:
+                raise RuntimeError(f"未配置 {key}.log 路径")
+            local_path = self._single_cache_path(key)
+            deployer.download_remote_file(remote_path, str(local_path))
+            source_files.append((key, local_path))
+            updated_candidates.append(self._resolve_updated_at(local_path))
+        merged_text = self._merge_log_files(source_files)
+        aggregate_path = self._aggregate_cache_path()
+        aggregate_path.write_text(merged_text, encoding="utf-8")
+        updated_at = max(updated_candidates) if updated_candidates else self._resolve_updated_at(aggregate_path)
+        return LogFetchResult(text=merged_text, local_path=str(aggregate_path), updated_at=updated_at)
+
+    def _merge_log_files(self, source_files: list[tuple[str, Path]]) -> str:
+        merged_events: list[tuple[int, int, int, list[str]]] = []
+        sequence = 0
+        for source_index, (source_key, local_path) in enumerate(source_files):
+            lines = read_local_text(str(local_path)).splitlines()
+            for start, end, event_time in group_line_events(lines):
+                event_lines = lines[start : end + 1]
+                if not event_lines:
+                    continue
+                event_key = self._event_sort_key(event_time, source_index, sequence)
+                merged_events.append((*event_key, self._tag_event_lines(source_key, event_lines)))
+                sequence += 1
+        merged_events.sort(key=lambda item: item[:3])
+        merged_lines: list[str] = []
+        for *_sort, event_lines in merged_events:
+            merged_lines.extend(event_lines)
+        return "\n".join(merged_lines)
+
+    @staticmethod
+    def _tag_event_lines(source_key: str, event_lines: list[str]) -> list[str]:
+        tagged = list(event_lines)
+        tagged[0] = f"[{source_key}] {tagged[0]}"
+        return tagged
+
+    @staticmethod
+    def _event_sort_key(
+        event_time: datetime | None,
+        source_index: int,
+        sequence: int,
+    ) -> tuple[int, datetime, int] | tuple[int, int, int]:
+        if event_time is None:
+            return (1, source_index, sequence)
+        return (0, event_time, sequence)
+
+    def _effective_remote_path(self, kind: str) -> str:
+        base = self.profile.target_path.rstrip("/")
+        if kind == "info":
+            if self.profile.log_path_default:
+                return LogViewerDialog._service_log_path_from_config(self.profile.log_path_default, "info.log")
+            return f"{base}/logs/info.log" if base else ""
+        if kind == "error":
+            if self.profile.log_path_error:
+                return LogViewerDialog._service_log_path_from_config(self.profile.log_path_error, "error.log")
+            return f"{base}/logs/error.log" if base else ""
+        if kind in {"debug", "warn"}:
+            default_path = self._effective_remote_path("info")
+            if default_path:
+                return LogViewerDialog._sibling_log_path(default_path, f"{kind}.log")
+            return f"{base}/logs/{kind}.log" if base else ""
+        return ""
+
+    def _cache_dir(self) -> Path:
+        profile_name = self.profile.name.strip() or "profile"
+        profile_slug = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in profile_name)
+        profile_slug = profile_slug or "profile"
+        profile_id = self.profile.id or "default"
+        cache_dir = Path(tempfile.gettempdir()) / _CACHE_ROOT_NAME / f"{profile_slug}_{profile_id}"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir
+
+    def _single_cache_path(self, source_key: str) -> Path:
+        return self._cache_dir() / f"{source_key}.log"
+
+    def _aggregate_cache_path(self) -> Path:
+        return self._cache_dir() / "all.log"
+
+    @staticmethod
+    def _resolve_updated_at(path: Path) -> datetime:
+        return datetime.fromtimestamp(path.stat().st_mtime)
 
 
 class LogViewerDialog(QDialog):
@@ -116,7 +234,9 @@ class LogViewerDialog(QDialog):
         self._raw_lines: list[str] = []
         self._display_text = ""
         self._last_result = FilteredLogResult([], 0, 0, 0, 0)
-        self._worker_request: tuple[str, int] | None = None
+        self._worker_request: str | None = None
+        self._last_loaded_path = ""
+        self._last_updated_at: datetime | None = None
         self.setWindowTitle(f"日志工作台 - {profile.name} @ {profile.host}")
         self.setWindowFlag(Qt.Window, True)
         self.setWindowFlag(Qt.WindowMinMaxButtonsHint, True)
@@ -150,8 +270,8 @@ class LogViewerDialog(QDialog):
         self._path_label.setProperty("role", "muted")
         self._path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         row.addWidget(QLabel("日志来源", self))
-        for key, filename in _SERVICE_LOG_SPECS:
-            button = QPushButton(filename, self)
+        for key, button_label in _SERVICE_LOG_SPECS:
+            button = QPushButton(button_label, self)
             button.setCheckable(True)
             button.clicked.connect(lambda _checked=False, source_key=key: self._on_source_button_clicked(source_key))
             self._source_button_group.addButton(button)
@@ -223,18 +343,9 @@ class LogViewerDialog(QDialog):
 
     def _build_action_bar(self) -> QHBoxLayout:
         row = QHBoxLayout()
-        self._line_limit_spin = QSpinBox(self)
-        self._line_limit_spin.setRange(100, _MAX_LINES)
-        self._line_limit_spin.setSingleStep(100)
-        self._line_limit_spin.setValue(_DEFAULT_LINES)
-        self._refresh_button = QPushButton("刷新", self)
+        self._refresh_button = QPushButton("下载最新", self)
         self._refresh_button.setProperty("role", "secondary")
         self._refresh_button.clicked.connect(self._fetch_current)
-        self._load_more_button = QPushButton("加载更多", self)
-        self._load_more_button.setProperty("role", "secondary")
-        self._load_more_button.clicked.connect(self._load_more)
-        self._jump_button = QPushButton("跳到最新", self)
-        self._jump_button.clicked.connect(self._jump_to_latest)
         self._copy_button = QPushButton("复制结果", self)
         self._copy_button.clicked.connect(self._copy_filtered_text)
         self._export_button = QPushButton("导出结果", self)
@@ -244,17 +355,12 @@ class LogViewerDialog(QDialog):
         self._config_button.clicked.connect(self._open_config)
         self._close_button = QPushButton("关闭", self)
         self._close_button.clicked.connect(self.close)
-        row.addWidget(QLabel("读取行数", self))
-        row.addWidget(self._line_limit_spin)
         row.addWidget(self._refresh_button)
-        row.addWidget(self._load_more_button)
-        row.addWidget(self._jump_button)
         row.addWidget(self._copy_button)
         row.addWidget(self._export_button)
         row.addStretch(1)
         row.addWidget(self._config_button)
         row.addWidget(self._close_button)
-        self._line_limit_spin.valueChanged.connect(self._fetch_current)
         return row
 
     def refresh_context(
@@ -277,10 +383,17 @@ class LogViewerDialog(QDialog):
             self._fetch_current()
 
     def _build_sources(self) -> dict[str, LogSource]:
-        return {
-            key: LogSource(key, f"服务日志 | {filename}", self._effective_remote_path(key), "remote")
-            for key, filename in _SERVICE_LOG_SPECS
+        sources = {
+            key: LogSource(key, f"服务日志 | {_SERVICE_LOG_FILENAMES[key]}", self._effective_remote_path(key), "remote")
+            for key in _SERVICE_LOG_FILENAMES
         }
+        sources[_AGGREGATE_SOURCE_KEY] = LogSource(
+            _AGGREGATE_SOURCE_KEY,
+            "服务日志 | 所有日志",
+            self._aggregate_remote_caption(),
+            "remote",
+        )
+        return dict(sorted(sources.items(), key=lambda item: [spec[0] for spec in _SERVICE_LOG_SPECS].index(item[0])))
 
     def _make_direct_source(self, path: str) -> LogSource | None:
         if not path:
@@ -300,7 +413,7 @@ class LogViewerDialog(QDialog):
     def _resolve_preferred_key(self, selected_key: str | None) -> str | None:
         if self._direct_source is not None:
             return None
-        for candidate in (selected_key, "info", "error", "debug", "warn"):
+        for candidate in (selected_key, "info", _AGGREGATE_SOURCE_KEY, "error", "debug", "warn"):
             if not candidate:
                 continue
             if candidate in self._sources:
@@ -321,11 +434,9 @@ class LogViewerDialog(QDialog):
         key = self._current_source_key()
         return self._sources.get(key) if key else None
 
-    def _current_request(self) -> tuple[str, int] | None:
+    def _current_request(self) -> str | None:
         source = self._current_source()
-        if source is None:
-            return None
-        return source.key, self._line_limit_spin.value()
+        return source.key if source else None
 
     def _on_source_button_clicked(self, source_key: str) -> None:
         self._direct_source = None
@@ -337,6 +448,7 @@ class LogViewerDialog(QDialog):
         self._path_label.setText(source.path if source and source.path else "当前没有可读取的日志来源")
         is_remote = bool(source and source.source_type == "remote")
         self._config_button.setEnabled(is_remote)
+        self._refresh_button.setEnabled(is_remote and not self._is_loading())
 
     def _effective_remote_path(self, kind: str) -> str:
         base = self.profile.target_path.rstrip("/")
@@ -355,6 +467,10 @@ class LogViewerDialog(QDialog):
             return f"{base}/logs/{kind}.log" if base else ""
         return ""
 
+    def _aggregate_remote_caption(self) -> str:
+        parts = [self._effective_remote_path(key) for key in _SERVICE_LOG_FILENAMES if self._effective_remote_path(key)]
+        return "\n".join(parts)
+
     def _fetch_current(self) -> None:
         source = self._current_source()
         if source is None or not source.path:
@@ -366,36 +482,40 @@ class LogViewerDialog(QDialog):
             return
         if self._worker and self._worker.isRunning():
             if self._worker_request != request:
-                self._status_label.setText("已切换日志来源，当前加载完成后自动刷新")
+                self._status_label.setText("已切换日志来源，当前下载完成后自动刷新")
                 self._set_loading_state(source)
             return
-        self._status_label.setText("加载中...")
         self._set_loading_state(source)
         self._set_fetch_buttons(False)
         self._worker_request = request
-        self._worker = LogFetchWorker(self.profile, source, self._line_limit_spin.value())
+        self._worker = LogFetchWorker(self.profile, source)
         self._worker.finished.connect(self._on_fetch_done)
         self._worker.failed.connect(self._on_fetch_failed)
         self._worker.start()
 
-    def _set_fetch_buttons(self, enabled: bool) -> None:
-        self._refresh_button.setEnabled(enabled)
-        self._load_more_button.setEnabled(enabled)
-        self._line_limit_spin.setEnabled(enabled)
+    def _is_loading(self) -> bool:
+        return bool(self._worker and self._worker.isRunning())
 
-    def _on_fetch_done(self, text: str) -> None:
+    def _set_fetch_buttons(self, enabled: bool) -> None:
+        source = self._current_source()
+        is_remote = bool(source and source.source_type == "remote")
+        self._refresh_button.setEnabled(enabled and is_remote)
+
+    def _on_fetch_done(self, result: LogFetchResult) -> None:
         finished_request = self._worker_request
         self._worker = None
         self._worker_request = None
         if self._should_refetch_after_current_worker(finished_request):
             self._set_fetch_buttons(True)
-            self._status_label.setText("加载中...")
             self._fetch_current()
             return
-        self._raw_lines = text.splitlines()
+        self._raw_lines = result.text.splitlines()
+        self._last_loaded_path = result.local_path
+        self._last_updated_at = result.updated_at
         self._apply_filters()
         self._set_fetch_buttons(True)
         self.initial_log_file = ""
+        self._update_source_caption()
 
     def _on_fetch_failed(self, error: str) -> None:
         finished_request = self._worker_request
@@ -403,14 +523,16 @@ class LogViewerDialog(QDialog):
         self._worker_request = None
         if self._should_refetch_after_current_worker(finished_request):
             self._set_fetch_buttons(True)
-            self._status_label.setText("加载中...")
             self._fetch_current()
             return
         self._raw_lines = []
         self._display_text = f"[错误] {error}"
+        self._last_loaded_path = ""
+        self._last_updated_at = None
         self._log_area.setPlainText(self._display_text)
         self._status_label.setText("加载失败")
         self._set_fetch_buttons(True)
+        self._update_source_caption()
 
     def _apply_filters(self) -> None:
         start_time, end_time = self._refresh_time_range_display()
@@ -461,7 +583,8 @@ class LogViewerDialog(QDialog):
         parts = [f"已加载 {loaded} 行", f"命中 {matched} 行", f"显示 {displayed} 行"]
         if start_time or end_time:
             parts.append(f"无时间戳跳过 {self._last_result.skipped_without_time} 行")
-        parts.append(f"最后更新 {datetime.now().strftime('%H:%M:%S')}")
+        if self._last_updated_at is not None:
+            parts.append(f"最后更新 {self._last_updated_at.strftime('%H:%M:%S')}")
         self._status_label.setText(" | ".join(parts))
         self._jump_to_latest()
 
@@ -483,18 +606,12 @@ class LogViewerDialog(QDialog):
         self._status_label.setText(text)
 
     def _set_loading_state(self, source: LogSource) -> None:
-        message = f"正在加载 {source.label}（最近 {self._line_limit_spin.value()} 行）..."
+        message = f"正在下载并加载 {source.label}..."
         self._status_label.setText(message)
         if not self._raw_lines:
             self._last_result = FilteredLogResult([], 0, 0, 0, 0)
             self._display_text = message
             self._log_area.setPlainText(self._display_text)
-
-    def _load_more(self) -> None:
-        next_value = min(_MAX_LINES, self._line_limit_spin.value() + _LOAD_MORE_STEP)
-        if next_value == self._line_limit_spin.value():
-            return
-        self._line_limit_spin.setValue(next_value)
 
     def _jump_to_latest(self) -> None:
         cursor = self._log_area.textCursor()
@@ -512,8 +629,8 @@ class LogViewerDialog(QDialog):
         if not self._display_text:
             QMessageBox.information(self, "导出结果", "当前没有可导出的内容。")
             return
-        name = self._path_name(self._current_source().path if self._current_source() else "")
-        default_name = name or "filtered.log"
+        export_path = self._last_loaded_path or (self._current_source().path if self._current_source() else "")
+        default_name = self._path_name(export_path) or "filtered.log"
         path, _ = QFileDialog.getSaveFileName(self, "导出结果", default_name)
         if not path:
             return
@@ -555,7 +672,7 @@ class LogViewerDialog(QDialog):
             self._custom_end_time = self._end_edit.dateTime().toPython()
         self._apply_filters()
 
-    def _should_refetch_after_current_worker(self, finished_request: tuple[str, int] | None) -> bool:
+    def _should_refetch_after_current_worker(self, finished_request: str | None) -> bool:
         if finished_request is None:
             return False
         current_request = self._current_request()

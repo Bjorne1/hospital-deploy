@@ -7,15 +7,17 @@ from pathlib import Path
 
 from PySide2.QtWidgets import QApplication
 
+from hospital_deploy_tool.constants import PROFILE_KIND_UNSET
 from hospital_deploy_tool.log_tools import (
     filter_log_lines,
+    group_line_events,
     parse_line_timestamp,
     read_local_tail,
+    read_local_text,
     resolve_time_range,
 )
-from hospital_deploy_tool.constants import PROFILE_KIND_UNSET
 from hospital_deploy_tool.models import DeploymentProfile
-from hospital_deploy_tool.ui.log_workbench import LogViewerDialog
+from hospital_deploy_tool.ui.log_workbench import LogFetchResult, LogFetchWorker, LogViewerDialog
 
 
 class LogToolsTests(unittest.TestCase):
@@ -128,6 +130,20 @@ class LogToolsTests(unittest.TestCase):
             path.write_text("a\nb\nc\nd\n", encoding="utf-8")
             self.assertEqual(read_local_tail(str(path), 2), "c\nd\n")
 
+    def test_read_local_text_returns_full_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "demo.log"
+            path.write_text("a\nb\nc\n", encoding="utf-8")
+            self.assertEqual(read_local_text(str(path)), "a\nb\nc\n")
+
+    def test_group_line_events_keeps_multiline_block(self) -> None:
+        lines = [
+            "2026-05-12 10:00:00 first",
+            "line 2",
+            "2026-05-12 10:00:01 second",
+        ]
+        self.assertEqual(group_line_events(lines), [(0, 1, datetime(2026, 5, 12, 10, 0, 0)), (2, 2, datetime(2026, 5, 12, 10, 0, 1))])
+
     def test_log_viewer_defaults_to_service_log(self) -> None:
         dialog = LogViewerDialog(
             profile=DeploymentProfile(name="demo", host="127.0.0.1", target_path="/srv/app"),
@@ -154,32 +170,19 @@ class LogToolsTests(unittest.TestCase):
         finally:
             dialog.close()
 
-    def test_log_viewer_limits_sources_to_four_service_logs(self) -> None:
-        history = [
-            self._history_record("1", r"C:\logs\one.log", "2026-04-22T10:00:00"),
-            self._history_record("2", r"C:\logs\two.log", "2026-04-22T09:00:00"),
-            self._history_record("3", r"C:\logs\three.log", "2026-04-22T08:00:00"),
-            self._history_record("4", r"C:\logs\four.log", "2026-04-22T07:00:00"),
-        ]
+    def test_log_viewer_includes_all_source_and_four_service_logs(self) -> None:
         dialog = LogViewerDialog(
             profile=DeploymentProfile(id="profile-1", name="demo", host="127.0.0.1", target_path="/srv/app"),
-            history=history,
+            history=[],
         )
         try:
-            self.assertEqual(list(dialog._sources), ["info", "error", "debug", "warn"])
-            self.assertEqual([source.label for source in dialog._sources.values()], [
-                "服务日志 | info.log",
-                "服务日志 | error.log",
-                "服务日志 | debug.log",
-                "服务日志 | warn.log",
-            ])
-            self.assertEqual([source.path for source in dialog._sources.values()], [
-                "/srv/app/logs/info.log",
-                "/srv/app/logs/error.log",
-                "/srv/app/logs/debug.log",
-                "/srv/app/logs/warn.log",
-            ])
-            self.assertEqual(len(dialog._source_buttons), 4)
+            self.assertEqual(list(dialog._sources), ["all", "info", "error", "debug", "warn"])
+            self.assertEqual(dialog._sources["all"].label, "服务日志 | 所有日志")
+            self.assertEqual(dialog._sources["info"].path, "/srv/app/logs/info.log")
+            self.assertEqual(dialog._sources["error"].path, "/srv/app/logs/error.log")
+            self.assertEqual(dialog._sources["debug"].path, "/srv/app/logs/debug.log")
+            self.assertEqual(dialog._sources["warn"].path, "/srv/app/logs/warn.log")
+            self.assertEqual(len(dialog._source_buttons), 5)
             self.assertEqual(dialog._current_source_key(), "info")
         finally:
             dialog.close()
@@ -193,8 +196,9 @@ class LogToolsTests(unittest.TestCase):
         try:
             self.assertEqual(dialog._current_source_key(), r"history:C:\logs\initial.log")
             self.assertEqual(dialog._current_source().path, r"C:\logs\initial.log")
-            self.assertEqual(list(dialog._sources), ["info", "error", "debug", "warn"])
+            self.assertEqual(list(dialog._sources), ["all", "info", "error", "debug", "warn"])
             self.assertFalse(any(button.isChecked() for button in dialog._source_buttons.values()))
+            self.assertFalse(dialog._refresh_button.isEnabled())
         finally:
             dialog.close()
 
@@ -221,12 +225,10 @@ class LogToolsTests(unittest.TestCase):
         dialog = LogViewerDialog(
             profile=DeploymentProfile(name="demo", host="127.0.0.1", target_path="/srv/app"),
             history=[],
-            current_log_file=r"C:\temp\current.log",
-            initial_log_file=r"C:\temp\current.log",
         )
         try:
             dialog._worker = RunningWorkerStub()
-            dialog._worker_request = ("info", dialog._line_limit_spin.value())
+            dialog._worker_request = "info"
             dialog._raw_lines = ["2026-03-30 10:00:00 stale"]
             dialog._display_text = "2026-03-30 10:00:00 stale"
             dialog._apply_filters()
@@ -237,7 +239,13 @@ class LogToolsTests(unittest.TestCase):
             refresh_calls: list[str | None] = []
             dialog._fetch_current = lambda: refresh_calls.append(dialog._current_source_key())  # type: ignore[method-assign]
 
-            dialog._on_fetch_done("2026-03-30 10:00:00 stale")
+            dialog._on_fetch_done(
+                LogFetchResult(
+                    text="2026-03-30 10:00:00 stale",
+                    local_path=r"C:\temp\info.log",
+                    updated_at=datetime(2026, 3, 30, 10, 0, 0),
+                )
+            )
 
             self.assertEqual(refresh_calls, ["error"])
             self.assertEqual(dialog._raw_lines, ["2026-03-30 10:00:00 stale"])
@@ -295,6 +303,99 @@ class LogToolsTests(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_refresh_button_disabled_for_history_source(self) -> None:
+        dialog = LogViewerDialog(
+            profile=DeploymentProfile(name="demo", host="127.0.0.1", target_path="/srv/app"),
+            history=[],
+            initial_log_file=r"C:\logs\history.log",
+        )
+        try:
+            self.assertFalse(dialog._refresh_button.isEnabled())
+        finally:
+            dialog.close()
+
+    def test_log_viewer_removed_paging_controls(self) -> None:
+        dialog = LogViewerDialog(
+            profile=DeploymentProfile(name="demo", host="127.0.0.1", target_path="/srv/app"),
+            history=[],
+        )
+        try:
+            self.assertFalse(hasattr(dialog, "_line_limit_spin"))
+            self.assertFalse(hasattr(dialog, "_load_more_button"))
+            self.assertFalse(hasattr(dialog, "_jump_button"))
+            self.assertEqual(dialog._refresh_button.text(), "下载最新")
+        finally:
+            dialog.close()
+
+    def test_log_fetch_worker_aggregate_merges_logs_by_timestamp_and_keeps_multiline_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = LogFetchWorker(
+                DeploymentProfile(id="p1", name="demo", host="127.0.0.1", target_path="/srv/app"),
+                LogViewerDialog(
+                    profile=DeploymentProfile(id="inner", name="demo", host="127.0.0.1", target_path="/srv/app"),
+                    history=[],
+                )._sources.get("info") or None,  # type: ignore[arg-type]
+            )
+            info_path = Path(tmp_dir) / "info.log"
+            error_path = Path(tmp_dir) / "error.log"
+            debug_path = Path(tmp_dir) / "debug.log"
+            warn_path = Path(tmp_dir) / "warn.log"
+            info_path.write_text("2026-05-12 10:00:02 info line\n", encoding="utf-8")
+            error_path.write_text("2026-05-12 10:00:01 error start\nstack line\n", encoding="utf-8")
+            debug_path.write_text("2026-05-12 10:00:03 debug line\n", encoding="utf-8")
+            warn_path.write_text("2026-05-12 10:00:00 warn line\n", encoding="utf-8")
+
+            merged = worker._merge_log_files([
+                ("info", info_path),
+                ("error", error_path),
+                ("debug", debug_path),
+                ("warn", warn_path),
+            ])
+            self.assertEqual(
+                merged.splitlines(),
+                [
+                    "[warn] 2026-05-12 10:00:00 warn line",
+                    "[error] 2026-05-12 10:00:01 error start",
+                    "stack line",
+                    "[info] 2026-05-12 10:00:02 info line",
+                    "[debug] 2026-05-12 10:00:03 debug line",
+                ],
+            )
+
+    def test_log_fetch_worker_reads_local_history_file_in_full(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_path = Path(tmp_dir) / "history.log"
+            log_path.write_text("line1\nline2\nline3\n", encoding="utf-8")
+            source = type("Source", (), {"path": str(log_path), "source_type": "local", "key": "history"})()
+            worker = LogFetchWorker(
+                DeploymentProfile(id="p1", name="demo", host="127.0.0.1", target_path="/srv/app"),
+                source,
+            )
+            result = worker._read_local_source()
+            self.assertEqual(result.text, "line1\nline2\nline3\n")
+            self.assertEqual(result.local_path, str(log_path))
+
+    def test_log_viewer_fetch_done_updates_loaded_path_and_status(self) -> None:
+        dialog = LogViewerDialog(
+            profile=DeploymentProfile(name="demo", host="127.0.0.1", target_path="/srv/app"),
+            history=[],
+        )
+        try:
+            dialog._worker_request = "info"
+            dialog._on_fetch_done(
+                LogFetchResult(
+                    text="2026-05-12 10:00:00 hello\n2026-05-12 10:00:01 world",
+                    local_path=r"C:\temp\info.log",
+                    updated_at=datetime(2026, 5, 12, 10, 1, 0),
+                )
+            )
+            self.assertEqual(dialog._last_loaded_path, r"C:\temp\info.log")
+            self.assertEqual(dialog._raw_lines, ["2026-05-12 10:00:00 hello", "2026-05-12 10:00:01 world"])
+            self.assertIn("已加载 2 行", dialog._status_label.text())
+            self.assertIn("最后更新 10:01:00", dialog._status_label.text())
+        finally:
+            dialog.close()
+
     def test_profile_defaults_to_unset_kind_when_old_config_has_no_field(self) -> None:
         profile = DeploymentProfile.from_dict({"name": "legacy"})
         self.assertEqual(profile.profile_kind, PROFILE_KIND_UNSET)
@@ -302,21 +403,6 @@ class LogToolsTests(unittest.TestCase):
     def test_profile_invalid_kind_falls_back_to_unset(self) -> None:
         profile = DeploymentProfile.from_dict({"name": "broken", "profile_kind": "java"})
         self.assertEqual(profile.profile_kind, PROFILE_KIND_UNSET)
-
-    @staticmethod
-    def _history_record(record_id: str, log_file: str, started_at: str) -> object:
-        from hospital_deploy_tool.models import HistoryRecord
-
-        return HistoryRecord(
-            id=record_id,
-            profile_id="profile-1",
-            profile_name="demo",
-            action="deploy",
-            host="127.0.0.1",
-            log_file=log_file,
-            started_at=started_at,
-            success=True,
-        )
 
 
 if __name__ == "__main__":

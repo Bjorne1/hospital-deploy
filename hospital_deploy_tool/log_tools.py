@@ -22,6 +22,15 @@ class FilteredLogResult:
     skipped_without_time: int
 
 
+def read_local_text(path: str) -> str:
+    target = Path(path)
+    if not target.exists():
+        raise FileNotFoundError(f"日志文件不存在: {path}")
+    if not target.is_file():
+        raise ValueError(f"不是日志文件: {path}")
+    return target.read_text(encoding="utf-8", errors="replace")
+
+
 def read_local_tail(path: str, lines: int) -> str:
     target = Path(path)
     if not target.exists():
@@ -29,7 +38,7 @@ def read_local_tail(path: str, lines: int) -> str:
     if not target.is_file():
         raise ValueError(f"不是日志文件: {path}")
     if lines <= 0:
-        return target.read_text(encoding="utf-8")
+        return read_local_text(path)
     with target.open("r", encoding="utf-8", errors="replace") as handle:
         tail_lines = deque(handle, maxlen=lines)
     return "".join(tail_lines)
@@ -124,6 +133,13 @@ def filter_log_lines(
         displayed_lines=len(filtered_lines),
         skipped_without_time=skipped_without_time,
     )
+
+
+def group_line_events(
+    lines: list[str],
+    now: datetime | None = None,
+) -> list[tuple[int, int, datetime | None]]:
+    return _group_line_events(lines, now)
 
 
 def _expand_indexes(indexes: list[int], total: int, context_lines: int) -> list[int]:

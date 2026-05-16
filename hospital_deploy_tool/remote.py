@@ -374,10 +374,15 @@ class RemoteDeployer:
 
     def remote_size(self, remote_path: str) -> int:
         assert self.sftp is not None
-        try:
-            return self.sftp.stat(remote_path).st_size or 0
-        except OSError:
-            return 0
+        return self.sftp.stat(remote_path).st_size or 0
+
+    def download_remote_file(self, remote_path: str, local_path: str) -> int:
+        assert self.sftp is not None
+        size = self.remote_size(remote_path)
+        local_file = Path(local_path)
+        local_file.parent.mkdir(parents=True, exist_ok=True)
+        self.sftp.get(remote_path, str(local_file))
+        return size
 
     def path_exists(self, remote_path: str) -> bool:
         assert self.sftp is not None
