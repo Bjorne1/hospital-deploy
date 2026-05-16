@@ -44,9 +44,10 @@ class DeployResult:
 
 
 class RemoteDeployer:
-    def __init__(self, profile: DeploymentProfile, logger) -> None:
+    def __init__(self, profile: DeploymentProfile, logger, operation_timeout: float | None = None) -> None:
         self.profile = profile
         self.logger = logger
+        self.operation_timeout = operation_timeout
         self.client = paramiko.SSHClient()
         self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         self.sftp: paramiko.SFTPClient | None = None
@@ -70,11 +71,14 @@ class RemoteDeployer:
             auth_timeout=15,
         )
         self.sftp = self.client.open_sftp()
+        if self.operation_timeout is not None:
+            self.sftp.get_channel().settimeout(self.operation_timeout)
         self.logger.success("SSH/SFTP 连接成功")
 
     def close(self) -> None:
         if self.sftp:
             self.sftp.close()
+            self.sftp = None
         self.client.close()
 
     def test_connection(self) -> None:

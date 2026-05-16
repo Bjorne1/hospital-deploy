@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from PySide2.QtCore import QDateTime, QSettings, Qt, QThread, Signal
+from PySide2.QtCore import QDateTime, QSettings, Qt, QThread, QTimer, Signal
 from PySide2.QtGui import QFont, QTextCursor
 from PySide2.QtWidgets import (
     QApplication,
@@ -49,6 +49,8 @@ _SERVICE_LOG_FILENAMES = {
 }
 _AGGREGATE_SOURCE_KEY = "all"
 _CACHE_ROOT_NAME = "hospital-deploy-log-workbench"
+_FETCH_OPERATION_TIMEOUT_SECONDS = 30
+_FETCH_WATCHDOG_TIMEOUT_MS = (_FETCH_OPERATION_TIMEOUT_SECONDS + 5) * 1000
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,20 +85,37 @@ class _NullLogger:
 class LogFetchWorker(QThread):
     finished = Signal(object)
     failed = Signal(str)
+    canceled = Signal()
 
     def __init__(self, profile: DeploymentProfile, source: LogSource) -> None:
         super().__init__()
         self.profile = profile
         self.source = source
+        self._deployer = None
+        self._cancel_requested = False
+
+    def cancel(self) -> None:
+        self._cancel_requested = True
+        if self._deployer is not None:
+            self._deployer.close()
 
     def run(self) -> None:
         try:
+            if self._cancel_requested:
+                self.canceled.emit()
+                return
             if self.source.source_type == "local":
                 result = self._read_local_source()
             else:
                 result = self._download_remote_source()
+            if self._cancel_requested:
+                self.canceled.emit()
+                return
             self.finished.emit(result)
         except Exception as exc:  # noqa: BLE001
+            if self._cancel_requested:
+                self.canceled.emit()
+                return
             self.failed.emit(str(exc))
 
     def _read_local_source(self) -> LogFetchResult:
@@ -107,7 +126,11 @@ class LogFetchWorker(QThread):
     def _download_remote_source(self) -> LogFetchResult:
         from ..remote import RemoteDeployer
 
-        with RemoteDeployer(self.profile, _NullLogger()) as deployer:
+        deployer = RemoteDeployer(self.profile, _NullLogger(), operation_timeout=_FETCH_OPERATION_TIMEOUT_SECONDS)
+        self._deployer = deployer
+        with deployer:
+            if self._cancel_requested:
+                raise RuntimeError("日志下载已取消")
             if self.source.key == _AGGREGATE_SOURCE_KEY:
                 return self._download_aggregate_logs(deployer)
             return self._download_single_remote_log(deployer, self.source)
@@ -231,6 +254,10 @@ class LogViewerDialog(QDialog):
         self._source_button_group: QButtonGroup | None = None
         self._direct_source: LogSource | None = None
         self._worker: LogFetchWorker | None = None
+        self._abandoned_workers: list[LogFetchWorker] = []
+        self._fetch_watchdog = QTimer(self)
+        self._fetch_watchdog.setSingleShot(True)
+        self._fetch_watchdog.timeout.connect(self._on_fetch_timeout)
         self._raw_lines: list[str] = []
         self._display_text = ""
         self._last_result = FilteredLogResult([], 0, 0, 0, 0)
@@ -492,6 +519,7 @@ class LogViewerDialog(QDialog):
         self._worker.finished.connect(self._on_fetch_done)
         self._worker.failed.connect(self._on_fetch_failed)
         self._worker.start()
+        self._fetch_watchdog.start(_FETCH_WATCHDOG_TIMEOUT_MS)
 
     def _is_loading(self) -> bool:
         return bool(self._worker and self._worker.isRunning())
@@ -502,6 +530,7 @@ class LogViewerDialog(QDialog):
         self._refresh_button.setEnabled(enabled and is_remote)
 
     def _on_fetch_done(self, result: LogFetchResult) -> None:
+        self._fetch_watchdog.stop()
         finished_request = self._worker_request
         self._worker = None
         self._worker_request = None
@@ -518,6 +547,7 @@ class LogViewerDialog(QDialog):
         self._update_source_caption()
 
     def _on_fetch_failed(self, error: str) -> None:
+        self._fetch_watchdog.stop()
         finished_request = self._worker_request
         self._worker = None
         self._worker_request = None
@@ -533,6 +563,43 @@ class LogViewerDialog(QDialog):
         self._status_label.setText("加载失败")
         self._set_fetch_buttons(True)
         self._update_source_caption()
+
+    def _on_fetch_timeout(self) -> None:
+        if not self._worker or not self._worker.isRunning():
+            return
+        self._cancel_current_fetch()
+        self._raw_lines = []
+        self._display_text = "[错误] 日志下载超时，请稍后重试或缩小日志文件范围"
+        self._last_loaded_path = ""
+        self._last_updated_at = None
+        self._log_area.setPlainText(self._display_text)
+        self._status_label.setText("加载失败：日志下载超时")
+        self._set_fetch_buttons(True)
+        self._update_source_caption()
+
+    def _cancel_current_fetch(self) -> None:
+        worker = self._worker
+        if worker is None:
+            self._worker_request = None
+            self._fetch_watchdog.stop()
+            return
+        self._worker = None
+        self._worker_request = None
+        self._fetch_watchdog.stop()
+        worker.finished.disconnect(self._on_fetch_done)
+        worker.failed.disconnect(self._on_fetch_failed)
+        worker.finished.connect(lambda _result, finished_worker=worker: self._discard_abandoned_worker(finished_worker))
+        worker.failed.connect(lambda _error, finished_worker=worker: self._discard_abandoned_worker(finished_worker))
+        worker.canceled.connect(lambda finished_worker=worker: self._discard_abandoned_worker(finished_worker))
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        worker.canceled.connect(worker.deleteLater)
+        self._abandoned_workers.append(worker)
+        worker.cancel()
+
+    def _discard_abandoned_worker(self, worker: LogFetchWorker) -> None:
+        if worker in self._abandoned_workers:
+            self._abandoned_workers.remove(worker)
 
     def _apply_filters(self) -> None:
         start_time, end_time = self._refresh_time_range_display()
@@ -702,6 +769,10 @@ class LogViewerDialog(QDialog):
         settings.beginGroup(_SETTINGS_GROUP)
         settings.setValue(_GEOMETRY_KEY, self.saveGeometry())
         settings.endGroup()
+        if self._is_loading():
+            self._cancel_current_fetch()
+            self._set_fetch_buttons(True)
+            self._update_source_caption()
         super().closeEvent(event)
 
     @staticmethod

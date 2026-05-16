@@ -396,6 +396,54 @@ class LogToolsTests(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_log_viewer_close_cancels_running_fetch_state(self) -> None:
+        class RunningWorkerStub:
+            finished = None
+            failed = None
+            canceled = None
+            cancel_called = False
+
+            @staticmethod
+            def isRunning() -> bool:
+                return True
+
+            def cancel(self) -> None:
+                self.cancel_called = True
+
+            def deleteLater(self) -> None:
+                return None
+
+        class SignalStub:
+            def disconnect(self, _handler) -> None:
+                return None
+
+            def connect(self, _handler) -> None:
+                return None
+
+        worker = RunningWorkerStub()
+        worker.finished = SignalStub()
+        worker.failed = SignalStub()
+        worker.canceled = SignalStub()
+
+        dialog = LogViewerDialog(
+            profile=DeploymentProfile(name="demo", host="127.0.0.1", target_path="/srv/app"),
+            history=[],
+        )
+        try:
+            dialog._worker = worker  # type: ignore[assignment]
+            dialog._worker_request = "info"
+            dialog._set_loading_state(dialog._sources["info"])
+
+            dialog.close()
+
+            self.assertTrue(worker.cancel_called)
+            self.assertIsNone(dialog._worker)
+            self.assertIsNone(dialog._worker_request)
+            self.assertFalse(dialog._is_loading())
+            self.assertTrue(dialog._refresh_button.isEnabled())
+        finally:
+            dialog.close()
+
     def test_profile_defaults_to_unset_kind_when_old_config_has_no_field(self) -> None:
         profile = DeploymentProfile.from_dict({"name": "legacy"})
         self.assertEqual(profile.profile_kind, PROFILE_KIND_UNSET)
