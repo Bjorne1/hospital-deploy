@@ -99,6 +99,8 @@ class ProfileActions:
             compress_upload=self.compress_check.isChecked(),
             log_path_default=existing.log_path_default if existing else "",
             log_path_error=existing.log_path_error if existing else "",
+            log_path_debug=existing.log_path_debug if existing else "",
+            log_path_warn=existing.log_path_warn if existing else "",
         )
 
     def current_profile(self) -> DeploymentProfile:

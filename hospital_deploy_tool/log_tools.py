@@ -9,7 +9,7 @@ from pathlib import Path
 _FULL_TIMESTAMP_RE = re.compile(r"(\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}:\d{2})")
 _SHORT_TIMESTAMP_RE = re.compile(r"(\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 _EVENT_START_TIMESTAMP_RE = re.compile(
-    r"^\s*(?:\[?\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?|\[?\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[.,]\d+)?)"
+    r"^\s*(?:\[[^\]]+\]\s+)?(?:\[?\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?|\[?\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[.,]\d+)?)"
 )
 
 

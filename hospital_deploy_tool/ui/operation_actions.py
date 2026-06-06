@@ -356,12 +356,21 @@ class OperationActions:
         profile = self.find_profile(record.profile_id) or self.current_profile()
         self.open_log_viewer(initial_log_file=record.log_file, profile=profile)
 
-    def on_log_config_saved(self, profile_id: str, default_path: str, error_path: str) -> None:
+    def on_log_config_saved(
+        self,
+        profile_id: str,
+        default_path: str,
+        error_path: str,
+        debug_path: str,
+        warn_path: str,
+    ) -> None:
         profile = self.find_profile(profile_id)
         if profile is None:
             return
         profile.log_path_default = default_path
         profile.log_path_error = error_path
+        profile.log_path_debug = debug_path
+        profile.log_path_warn = warn_path
         self.storage.upsert_profile(self.state, profile)
         self.refresh_log_viewer(profile, auto_fetch=False)
 

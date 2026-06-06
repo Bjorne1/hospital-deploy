@@ -130,15 +130,26 @@ class HistoryDialog(QDialog):
 
 
 class LogPathConfigDialog(QDialog):
-    def __init__(self, default_path: str, error_path: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        default_path: str,
+        error_path: str,
+        debug_path: str,
+        warn_path: str,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("配置日志路径")
         self.setFixedWidth(420)
         form = QFormLayout(self)
         self._default_edit = QLineEdit(default_path, self)
         self._error_edit = QLineEdit(error_path, self)
+        self._debug_edit = QLineEdit(debug_path, self)
+        self._warn_edit = QLineEdit(warn_path, self)
         form.addRow("info.log", self._default_edit)
         form.addRow("error.log", self._error_edit)
+        form.addRow("debug.log", self._debug_edit)
+        form.addRow("warn.log", self._warn_edit)
         buttons = QHBoxLayout()
         cancel = QPushButton("取消", self)
         cancel.clicked.connect(self.reject)
@@ -154,5 +165,10 @@ class LogPathConfigDialog(QDialog):
         widget.setLayout(layout)
         return widget
 
-    def get_paths(self) -> tuple[str, str]:
-        return self._default_edit.text().strip(), self._error_edit.text().strip()
+    def get_paths(self) -> tuple[str, str, str, str]:
+        return (
+            self._default_edit.text().strip(),
+            self._error_edit.text().strip(),
+            self._debug_edit.text().strip(),
+            self._warn_edit.text().strip(),
+        )

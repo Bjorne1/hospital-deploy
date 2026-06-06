@@ -17,6 +17,7 @@ from hospital_deploy_tool.log_tools import (
     resolve_time_range,
 )
 from hospital_deploy_tool.models import DeploymentProfile
+from hospital_deploy_tool.ui.log_aux_dialogs import LogPathConfigDialog
 from hospital_deploy_tool.ui.log_workbench import LogFetchResult, LogFetchWorker, LogViewerDialog
 
 
@@ -105,6 +106,24 @@ class LogToolsTests(unittest.TestCase):
         self.assertEqual(result.lines[0], "2026-03-23 10:00:00 SQL start")
         self.assertEqual(result.lines[-1], "FROM t WHERE id = 1")
 
+    def test_filter_log_lines_supports_aggregate_source_prefix(self) -> None:
+        lines = [
+            "[warn] 2026-05-12 10:00:00 warmup",
+            "[error] 2026-05-12 10:00:01 target exception",
+            "stack line",
+            "[info] 2026-05-12 10:00:02 healthy",
+        ]
+        result = filter_log_lines(lines, include_keyword="target exception")
+        self.assertEqual(result.matched_lines, 2)
+        self.assertEqual(result.displayed_lines, 2)
+        self.assertEqual(
+            result.lines,
+            [
+                "[error] 2026-05-12 10:00:01 target exception",
+                "stack line",
+            ],
+        )
+
     def test_filter_log_lines_supports_trace_id_keyword(self) -> None:
         lines = [
             '2026-05-12 09:15:12.070 [a59332102fba437bb6db917fdc4646d1] INFO  demo traceId=a59332102fba437bb6db917fdc4646d1',
@@ -167,6 +186,49 @@ class LogToolsTests(unittest.TestCase):
         )
         try:
             self.assertEqual(dialog._sources["info"].path, "/srv/app/logs/info.log")
+        finally:
+            dialog.close()
+
+    def test_log_viewer_supports_configured_debug_and_warn_log_paths(self) -> None:
+        profile = DeploymentProfile(
+            id="profile-1",
+            name="demo",
+            host="127.0.0.1",
+            target_path="/srv/app",
+            log_path_default="/custom/logs/info.log",
+            log_path_error="/custom/logs/error.log",
+            log_path_debug="/debug-area/debug.log",
+            log_path_warn="/warn-area/warn.log",
+        )
+        dialog = LogViewerDialog(profile=profile, history=[])
+        try:
+            self.assertEqual(dialog._sources["info"].path, "/custom/logs/info.log")
+            self.assertEqual(dialog._sources["error"].path, "/custom/logs/error.log")
+            self.assertEqual(dialog._sources["debug"].path, "/debug-area/debug.log")
+            self.assertEqual(dialog._sources["warn"].path, "/warn-area/warn.log")
+            worker = LogFetchWorker(profile, dialog._sources["all"])
+            self.assertEqual(worker._effective_remote_path("debug"), "/debug-area/debug.log")
+            self.assertEqual(worker._effective_remote_path("warn"), "/warn-area/warn.log")
+        finally:
+            dialog.close()
+
+    def test_log_path_config_dialog_returns_all_service_log_paths(self) -> None:
+        dialog = LogPathConfigDialog(
+            " /custom/logs/info.log ",
+            " /custom/logs/error.log ",
+            " /debug-area/debug.log ",
+            " /warn-area/warn.log ",
+        )
+        try:
+            self.assertEqual(
+                dialog.get_paths(),
+                (
+                    "/custom/logs/info.log",
+                    "/custom/logs/error.log",
+                    "/debug-area/debug.log",
+                    "/warn-area/warn.log",
+                ),
+            )
         finally:
             dialog.close()
 

@@ -52,6 +52,8 @@ class DeploymentProfile:
     compress_upload: bool = False
     log_path_default: str = ""
     log_path_error: str = ""
+    log_path_debug: str = ""
+    log_path_warn: str = ""
 
     @property
     def is_archive(self) -> bool:

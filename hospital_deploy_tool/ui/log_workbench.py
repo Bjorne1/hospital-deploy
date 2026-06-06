@@ -206,11 +206,20 @@ class LogFetchWorker(QThread):
             if self.profile.log_path_error:
                 return LogViewerDialog._service_log_path_from_config(self.profile.log_path_error, "error.log")
             return f"{base}/logs/error.log" if base else ""
-        if kind in {"debug", "warn"}:
+        if kind == "debug":
+            if self.profile.log_path_debug:
+                return LogViewerDialog._service_log_path_from_config(self.profile.log_path_debug, "debug.log")
             default_path = self._effective_remote_path("info")
             if default_path:
-                return LogViewerDialog._sibling_log_path(default_path, f"{kind}.log")
-            return f"{base}/logs/{kind}.log" if base else ""
+                return LogViewerDialog._sibling_log_path(default_path, "debug.log")
+            return f"{base}/logs/debug.log" if base else ""
+        if kind == "warn":
+            if self.profile.log_path_warn:
+                return LogViewerDialog._service_log_path_from_config(self.profile.log_path_warn, "warn.log")
+            default_path = self._effective_remote_path("info")
+            if default_path:
+                return LogViewerDialog._sibling_log_path(default_path, "warn.log")
+            return f"{base}/logs/warn.log" if base else ""
         return ""
 
     def _cache_dir(self) -> Path:
@@ -234,7 +243,7 @@ class LogFetchWorker(QThread):
 
 
 class LogViewerDialog(QDialog):
-    config_saved = Signal(str, str, str)
+    config_saved = Signal(str, str, str, str, str)
 
     def __init__(
         self,
@@ -487,11 +496,20 @@ class LogViewerDialog(QDialog):
             if self.profile.log_path_error:
                 return self._service_log_path_from_config(self.profile.log_path_error, "error.log")
             return f"{base}/logs/error.log" if base else ""
-        if kind in {"debug", "warn"}:
+        if kind == "debug":
+            if self.profile.log_path_debug:
+                return self._service_log_path_from_config(self.profile.log_path_debug, "debug.log")
             default_path = self._effective_remote_path("info")
             if default_path:
-                return self._sibling_log_path(default_path, f"{kind}.log")
-            return f"{base}/logs/{kind}.log" if base else ""
+                return self._sibling_log_path(default_path, "debug.log")
+            return f"{base}/logs/debug.log" if base else ""
+        if kind == "warn":
+            if self.profile.log_path_warn:
+                return self._service_log_path_from_config(self.profile.log_path_warn, "warn.log")
+            default_path = self._effective_remote_path("info")
+            if default_path:
+                return self._sibling_log_path(default_path, "warn.log")
+            return f"{base}/logs/warn.log" if base else ""
         return ""
 
     def _aggregate_remote_caption(self) -> str:
@@ -708,14 +726,18 @@ class LogViewerDialog(QDialog):
         dialog = LogPathConfigDialog(
             self.profile.log_path_default or self._effective_remote_path("info"),
             self.profile.log_path_error or self._effective_remote_path("error"),
+            self.profile.log_path_debug or self._effective_remote_path("debug"),
+            self.profile.log_path_warn or self._effective_remote_path("warn"),
             self,
         )
         if dialog.exec_() != QDialog.Accepted:
             return
-        default_path, error_path = dialog.get_paths()
+        default_path, error_path, debug_path, warn_path = dialog.get_paths()
         self.profile.log_path_default = default_path
         self.profile.log_path_error = error_path
-        self.config_saved.emit(self.profile.id, default_path, error_path)
+        self.profile.log_path_debug = debug_path
+        self.profile.log_path_warn = warn_path
+        self.config_saved.emit(self.profile.id, default_path, error_path, debug_path, warn_path)
         self.refresh_context(
             self.profile,
             self.history,
