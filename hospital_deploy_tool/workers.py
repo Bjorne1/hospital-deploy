@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timedelta
+import time
 from pathlib import Path
 
 from PySide2.QtCore import QObject, Signal
@@ -41,6 +41,10 @@ class OperationWorker(QObject):
         self.backup_record = backup_record
         self.run_post_commands_after_restore = run_post_commands_after_restore
         self.started_at = datetime.now()
+        self.progress_started_at: float | None = None
+        self.progress_baseline_sent = 0
+        self.progress_total_bytes: int | None = None
+        self.progress_last_total_sent = 0
         self.logger = RunLogger(log_path, self.forward_log)
 
     def run(self) -> None:
@@ -123,10 +127,65 @@ class OperationWorker(QObject):
         index: int,
         total_files: int,
     ) -> None:
+        now = time.monotonic()
+        self.update_progress_timer(total_sent, total_bytes, now)
         percent = 0 if total_bytes == 0 else min(100, int(total_sent * 100 / total_bytes))
         file_text = f"{index}/{total_files} {current_file}"
-        detail = f"{self.format_size(file_sent)} / {self.format_size(file_total)}"
+        detail = self.format_progress_detail(file_sent, file_total, total_sent, total_bytes, now)
         self.progress_changed.emit(percent, file_text, detail)
+
+    def update_progress_timer(self, total_sent: int, total_bytes: int, now: float) -> None:
+        should_reset = (
+            self.progress_started_at is None
+            or self.progress_total_bytes != total_bytes
+            or total_sent < self.progress_last_total_sent
+        )
+        if should_reset:
+            self.progress_started_at = now
+            self.progress_baseline_sent = total_sent
+            self.progress_total_bytes = total_bytes
+        self.progress_last_total_sent = total_sent
+
+    def format_progress_detail(
+        self,
+        file_sent: int,
+        file_total: int,
+        total_sent: int,
+        total_bytes: int,
+        now: float,
+    ) -> str:
+        file_part = f"{self.format_size(file_sent)} / {self.format_size(file_total)}"
+        total_part = f"总计 {self.format_size(total_sent)} / {self.format_size(total_bytes)}"
+        estimate = self.format_transfer_estimate(total_sent, total_bytes, now)
+        return f"{file_part} | {total_part}\n{estimate}"
+
+    def format_transfer_estimate(self, total_sent: int, total_bytes: int, now: float) -> str:
+        if total_bytes <= 0 or self.progress_started_at is None:
+            return "速度 计算中 | 预计完成 计算中"
+        elapsed = now - self.progress_started_at
+        sent_since_start = total_sent - self.progress_baseline_sent
+        if elapsed <= 0 or sent_since_start <= 0:
+            return "速度 计算中 | 预计完成 计算中"
+        speed = sent_since_start / elapsed
+        if speed <= 0:
+            return "速度 计算中 | 预计完成 计算中"
+        remaining_seconds = max(0.0, (total_bytes - total_sent) / speed)
+        eta = datetime.now() + timedelta(seconds=remaining_seconds)
+        return (
+            f"速度 {self.format_size(speed)}/s | "
+            f"剩余 {self.format_duration(remaining_seconds)} | "
+            f"预计完成 {eta.strftime('%H:%M:%S')}"
+        )
+
+    def format_duration(self, seconds: float) -> str:
+        total_seconds = max(0, int(round(seconds)))
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours:
+            return f"{hours}小时{minutes}分{seconds}秒"
+        if minutes:
+            return f"{minutes}分{seconds}秒"
+        return f"{seconds}秒"
 
     def common_payload(self, success: bool, summary: str) -> dict[str, object]:
         ended = datetime.now()
@@ -154,7 +213,7 @@ class OperationWorker(QObject):
     def forward_log(self, level: str, line: str) -> None:
         self.log_emitted.emit(level, line)
 
-    def format_size(self, value: int) -> str:
+    def format_size(self, value: int | float) -> str:
         size = float(value)
         for unit in ["B", "KB", "MB", "GB", "TB"]:
             if size < 1024 or unit == "TB":
