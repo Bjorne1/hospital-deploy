@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import posixpath
 import tempfile
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -27,10 +28,18 @@ from PySide2.QtWidgets import (
     QWidget,
 )
 
-from ..constants import APP_NAME
+from ..constants import APP_NAME, get_history_log_cache_dir
+from ..log_history import (
+    HistoryLogCache,
+    HistoryLogFile,
+    format_bytes,
+    history_log_kind,
+    history_log_label,
+    read_history_log_text,
+)
 from ..log_tools import FilteredLogResult, filter_log_lines, group_line_events, read_local_text, resolve_time_range
 from ..models import DeploymentProfile, HistoryRecord
-from .log_aux_dialogs import LogPathConfigDialog
+from .log_aux_dialogs import HistoryLogBrowserDialog, LogPathConfigDialog
 
 _SETTINGS_GROUP = "log_workbench"
 _GEOMETRY_KEY = "geometry"
@@ -51,6 +60,9 @@ _AGGREGATE_SOURCE_KEY = "all"
 _CACHE_ROOT_NAME = "hospital-deploy-log-workbench"
 _FETCH_OPERATION_TIMEOUT_SECONDS = 30
 _FETCH_WATCHDOG_TIMEOUT_MS = (_FETCH_OPERATION_TIMEOUT_SECONDS + 5) * 1000
+_HISTORY_FETCH_OPERATION_TIMEOUT_SECONDS = 120
+_HISTORY_FETCH_WATCHDOG_TIMEOUT_MS = (_HISTORY_FETCH_OPERATION_TIMEOUT_SECONDS + 10) * 1000
+_LARGE_HISTORY_SELECTION_BYTES = 50 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +71,8 @@ class LogSource:
     label: str
     path: str
     source_type: str
+    history_files: tuple[HistoryLogFile, ...] = ()
+    history_root_path: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,14 +140,21 @@ class LogFetchWorker(QThread):
     def _download_remote_source(self) -> LogFetchResult:
         from ..remote import RemoteDeployer
 
-        deployer = RemoteDeployer(self.profile, _NullLogger(), operation_timeout=_FETCH_OPERATION_TIMEOUT_SECONDS)
+        deployer = RemoteDeployer(self.profile, _NullLogger(), operation_timeout=self._operation_timeout_seconds())
         self._deployer = deployer
         with deployer:
             if self._cancel_requested:
                 raise RuntimeError("日志下载已取消")
+            if self.source.source_type == "history_remote":
+                return self._download_history_logs(deployer, self.source)
             if self.source.key == _AGGREGATE_SOURCE_KEY:
                 return self._download_aggregate_logs(deployer)
             return self._download_single_remote_log(deployer, self.source)
+
+    def _operation_timeout_seconds(self) -> int:
+        if self.source.source_type == "history_remote":
+            return _HISTORY_FETCH_OPERATION_TIMEOUT_SECONDS
+        return _FETCH_OPERATION_TIMEOUT_SECONDS
 
     def _download_single_remote_log(self, deployer, source: LogSource) -> LogFetchResult:  # noqa: ANN001
         size = deployer.remote_size(source.path)
@@ -158,6 +179,30 @@ class LogFetchWorker(QThread):
             updated_candidates.append(self._resolve_updated_at(local_path))
         merged_text = self._merge_log_files(source_files)
         aggregate_path = self._aggregate_cache_path()
+        aggregate_path.write_text(merged_text, encoding="utf-8")
+        updated_at = max(updated_candidates) if updated_candidates else self._resolve_updated_at(aggregate_path)
+        return LogFetchResult(text=merged_text, local_path=str(aggregate_path), updated_at=updated_at)
+
+    def _download_history_logs(self, deployer, source: LogSource) -> LogFetchResult:  # noqa: ANN001
+        if not source.history_files:
+            raise RuntimeError("未选择历史日志文件")
+        source_files: list[tuple[str, Path]] = []
+        updated_candidates: list[datetime] = []
+        for history_file in source.history_files:
+            if self._cancel_requested:
+                raise RuntimeError("日志下载已取消")
+            local_archive_path = self._history_archive_cache_path(history_file)
+            if not self._is_cached_history_archive(local_archive_path, history_file):
+                local_archive_path.parent.mkdir(parents=True, exist_ok=True)
+                deployer.download_remote_file(history_file.remote_path, str(local_archive_path))
+            local_text_path = self._history_text_cache_path(history_file)
+            text = read_history_log_text(local_archive_path)
+            local_text_path.parent.mkdir(parents=True, exist_ok=True)
+            local_text_path.write_text(text, encoding="utf-8")
+            source_files.append((f"history:{history_log_label(history_file.name)}", local_text_path))
+            updated_candidates.append(history_file.modified_at or self._resolve_updated_at(local_archive_path))
+        merged_text = self._merge_log_files(source_files)
+        aggregate_path = self._history_aggregate_cache_path()
         aggregate_path.write_text(merged_text, encoding="utf-8")
         updated_at = max(updated_candidates) if updated_candidates else self._resolve_updated_at(aggregate_path)
         return LogFetchResult(text=merged_text, local_path=str(aggregate_path), updated_at=updated_at)
@@ -236,6 +281,38 @@ class LogFetchWorker(QThread):
 
     def _aggregate_cache_path(self) -> Path:
         return self._cache_dir() / "all.log"
+
+    def _history_archive_cache_path(self, history_file: HistoryLogFile) -> Path:
+        return self._history_cache().archive_path(history_file)
+
+    def _history_text_cache_path(self, history_file: HistoryLogFile) -> Path:
+        return self._history_cache().text_path(history_file)
+
+    def _history_aggregate_cache_path(self) -> Path:
+        return self._history_cache().aggregate_path()
+
+    def _history_cache(self) -> HistoryLogCache:
+        return HistoryLogCache(
+            get_history_log_cache_dir(),
+            self.profile.id,
+            self.profile.name,
+            self.source.history_root_path or self._history_root_path_from_files(),
+        )
+
+    def _history_root_path_from_files(self) -> str:
+        if not self.source.history_files:
+            return "history"
+        first = self.source.history_files[0]
+        date_dir = posixpath.dirname(first.remote_path)
+        return posixpath.dirname(date_dir.rstrip("/")) or "history"
+
+    @staticmethod
+    def _is_cached_history_archive(path: Path, history_file: HistoryLogFile) -> bool:
+        if not path.exists() or not path.is_file():
+            return False
+        if history_file.size <= 0:
+            return True
+        return path.stat().st_size == history_file.size
 
     @staticmethod
     def _resolve_updated_at(path: Path) -> datetime:
@@ -386,6 +463,9 @@ class LogViewerDialog(QDialog):
         self._copy_button.clicked.connect(self._copy_filtered_text)
         self._export_button = QPushButton("导出结果", self)
         self._export_button.clicked.connect(self._export_filtered_text)
+        self._history_button = QPushButton("历史日志", self)
+        self._history_button.setProperty("role", "secondary")
+        self._history_button.clicked.connect(self._open_history_logs)
         self._config_button = QPushButton("配置路径", self)
         self._config_button.setProperty("role", "muted")
         self._config_button.clicked.connect(self._open_config)
@@ -394,6 +474,7 @@ class LogViewerDialog(QDialog):
         row.addWidget(self._refresh_button)
         row.addWidget(self._copy_button)
         row.addWidget(self._export_button)
+        row.addWidget(self._history_button)
         row.addStretch(1)
         row.addWidget(self._config_button)
         row.addWidget(self._close_button)
@@ -482,9 +563,10 @@ class LogViewerDialog(QDialog):
     def _update_source_caption(self) -> None:
         source = self._current_source()
         self._path_label.setText(source.path if source and source.path else "当前没有可读取的日志来源")
-        is_remote = bool(source and source.source_type == "remote")
-        self._config_button.setEnabled(is_remote)
-        self._refresh_button.setEnabled(is_remote and not self._is_loading())
+        is_service_remote = bool(source and source.source_type == "remote")
+        self._config_button.setEnabled(is_service_remote)
+        self._refresh_button.setEnabled(is_service_remote and not self._is_loading())
+        self._history_button.setEnabled(not self._is_loading())
 
     def _effective_remote_path(self, kind: str) -> str:
         base = self.profile.target_path.rstrip("/")
@@ -537,15 +619,22 @@ class LogViewerDialog(QDialog):
         self._worker.finished.connect(self._on_fetch_done)
         self._worker.failed.connect(self._on_fetch_failed)
         self._worker.start()
-        self._fetch_watchdog.start(_FETCH_WATCHDOG_TIMEOUT_MS)
+        self._fetch_watchdog.start(self._fetch_watchdog_timeout_ms(source))
 
     def _is_loading(self) -> bool:
         return bool(self._worker and self._worker.isRunning())
 
     def _set_fetch_buttons(self, enabled: bool) -> None:
         source = self._current_source()
-        is_remote = bool(source and source.source_type == "remote")
-        self._refresh_button.setEnabled(enabled and is_remote)
+        is_service_remote = bool(source and source.source_type == "remote")
+        self._refresh_button.setEnabled(enabled and is_service_remote)
+        self._history_button.setEnabled(enabled)
+
+    @staticmethod
+    def _fetch_watchdog_timeout_ms(source: LogSource) -> int:
+        if source.source_type == "history_remote":
+            return _HISTORY_FETCH_WATCHDOG_TIMEOUT_MS
+        return _FETCH_WATCHDOG_TIMEOUT_MS
 
     def _on_fetch_done(self, result: LogFetchResult) -> None:
         self._fetch_watchdog.stop()
@@ -745,6 +834,74 @@ class LogViewerDialog(QDialog):
             initial_log_file="",
             auto_fetch=True,
         )
+
+    def _open_history_logs(self) -> None:
+        if self._is_loading():
+            QMessageBox.information(self, "历史日志", "当前正在加载日志，请稍后再打开历史日志。")
+            return
+        history_root = self._history_root_path()
+        if not history_root:
+            QMessageBox.warning(self, "历史日志", "当前没有可推导的 history 目录，请先配置 info.log 路径。")
+            return
+        dialog = HistoryLogBrowserDialog(self.profile, history_root, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        selected_files = dialog.selected_files()
+        if not selected_files:
+            return
+        if not self._confirm_large_history_selection(selected_files):
+            return
+        self._direct_source = self._make_history_source(selected_files)
+        self.initial_log_file = ""
+        self._clear_service_source_buttons()
+        self._update_source_caption()
+        self._fetch_current()
+
+    def _history_root_path(self) -> str:
+        info_path = self._effective_remote_path("info")
+        if not info_path:
+            return ""
+        parent = posixpath.dirname(info_path.rstrip("/"))
+        if not parent:
+            return "history"
+        return posixpath.join(parent, "history")
+
+    def _confirm_large_history_selection(self, files: tuple[HistoryLogFile, ...]) -> bool:
+        total_size = sum(file.size for file in files)
+        if total_size < _LARGE_HISTORY_SELECTION_BYTES:
+            return True
+        answer = QMessageBox.question(
+            self,
+            "历史日志",
+            f"已选择 {len(files)} 个历史日志文件，压缩大小 {format_bytes(total_size)}。加载后会下载、解压并在本地过滤，可能需要较长时间。是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _make_history_source(self, files: tuple[HistoryLogFile, ...]) -> LogSource:
+        paths = "\n".join(file.remote_path for file in files)
+        digest = hashlib.sha1(paths.encode("utf-8")).hexdigest()[:12]
+        dates = sorted({file.date for file in files}, reverse=True)
+        date_label = dates[0] if len(dates) == 1 else f"{dates[0]} 等 {len(dates)} 天"
+        kind_counts: dict[str, int] = {}
+        for file in files:
+            kind = history_log_kind(file.name)
+            kind_counts[kind] = kind_counts.get(kind, 0) + 1
+        kind_label = ", ".join(f"{kind} x{count}" for kind, count in sorted(kind_counts.items()))
+        return LogSource(
+            key=f"history_remote:{digest}",
+            label=f"历史日志 | {date_label} | {kind_label}",
+            path=paths,
+            source_type="history_remote",
+            history_files=files,
+            history_root_path=self._history_root_path(),
+        )
+
+    def _clear_service_source_buttons(self) -> None:
+        for button in self._source_buttons.values():
+            button.blockSignals(True)
+            button.setChecked(False)
+            button.blockSignals(False)
 
     def _on_time_mode_changed(self) -> None:
         enabled = str(self._range_combo.currentData()) == "custom"

@@ -58,3 +58,7 @@ def get_config_path() -> Path:
 
 def get_logs_dir() -> Path:
     return get_data_dir() / "logs"
+
+
+def get_history_log_cache_dir() -> Path:
+    return _get_exe_dir() / "history-log-cache"

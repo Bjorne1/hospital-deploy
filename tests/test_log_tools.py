@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gzip
+import shutil
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -8,6 +10,7 @@ from pathlib import Path
 from PySide2.QtWidgets import QApplication
 
 from hospital_deploy_tool.constants import PROFILE_KIND_UNSET
+from hospital_deploy_tool.log_history import HistoryLogCache, HistoryLogFile
 from hospital_deploy_tool.log_tools import (
     filter_log_lines,
     group_line_events,
@@ -18,7 +21,7 @@ from hospital_deploy_tool.log_tools import (
 )
 from hospital_deploy_tool.models import DeploymentProfile
 from hospital_deploy_tool.ui.log_aux_dialogs import LogPathConfigDialog
-from hospital_deploy_tool.ui.log_workbench import LogFetchResult, LogFetchWorker, LogViewerDialog
+from hospital_deploy_tool.ui.log_workbench import LogFetchResult, LogFetchWorker, LogSource, LogViewerDialog
 
 
 class LogToolsTests(unittest.TestCase):
@@ -232,6 +235,62 @@ class LogToolsTests(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_log_viewer_derives_history_root_from_info_log_path(self) -> None:
+        dialog = LogViewerDialog(
+            profile=DeploymentProfile(
+                name="demo",
+                host="127.0.0.1",
+                target_path="/srv/app",
+                log_path_default="/custom/logs/info.log",
+            ),
+            history=[],
+        )
+        try:
+            self.assertEqual(dialog._history_root_path(), "/custom/logs/history")
+        finally:
+            dialog.close()
+
+    def test_log_viewer_builds_history_source_label_and_paths(self) -> None:
+        dialog = LogViewerDialog(
+            profile=DeploymentProfile(name="demo", host="127.0.0.1", target_path="/srv/app"),
+            history=[],
+        )
+        files = (
+            HistoryLogFile("2026-06-03", "info.2026-06-03.32.log.gz", "/logs/history/2026-06-03/info.2026-06-03.32.log.gz", 10),
+            HistoryLogFile("2026-06-03", "error.2026-06-03.0.log.gz", "/logs/history/2026-06-03/error.2026-06-03.0.log.gz", 20),
+        )
+        try:
+            source = dialog._make_history_source(files)
+            self.assertEqual(source.source_type, "history_remote")
+            self.assertIn("历史日志 | 2026-06-03", source.label)
+            self.assertIn("info x1", source.label)
+            self.assertIn("error x1", source.label)
+            self.assertIn(files[0].remote_path, source.path)
+            self.assertEqual(source.history_files, files)
+        finally:
+            dialog.close()
+
+    def test_history_log_cache_persists_dates_and_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache = HistoryLogCache(Path(tmp_dir), "profile-1", "demo", "/srv/app/logs/history")
+            files = [
+                HistoryLogFile(
+                    "2026-06-03",
+                    "info.2026-06-03.32.log.gz",
+                    "/srv/app/logs/history/2026-06-03/info.2026-06-03.32.log.gz",
+                    1024,
+                    datetime(2026, 6, 3, 10, 0, 0),
+                )
+            ]
+
+            cache.update_dates(["2026-06-03", "2026-06-02"])
+            cache.update_files("2026-06-03", files)
+            reloaded = HistoryLogCache(Path(tmp_dir), "profile-1", "demo", "/srv/app/logs/history")
+
+            self.assertEqual(reloaded.list_dates(), ["2026-06-03", "2026-06-02"])
+            self.assertEqual(reloaded.list_files("2026-06-03"), files)
+            self.assertTrue(str(reloaded.archive_path(files[0])).startswith(str(Path(tmp_dir))))
+
     def test_log_viewer_includes_all_source_and_four_service_logs(self) -> None:
         dialog = LogViewerDialog(
             profile=DeploymentProfile(id="profile-1", name="demo", host="127.0.0.1", target_path="/srv/app"),
@@ -436,6 +495,96 @@ class LogToolsTests(unittest.TestCase):
             result = worker._read_local_source()
             self.assertEqual(result.text, "line1\nline2\nline3\n")
             self.assertEqual(result.local_path, str(log_path))
+
+    def test_log_fetch_worker_downloads_and_merges_history_gzip_files(self) -> None:
+        class FakeDeployer:
+            @staticmethod
+            def download_remote_file(remote_path: str, local_path: str) -> int:
+                Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(remote_path, local_path)
+                return Path(remote_path).stat().st_size
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            remote_dir = Path(tmp_dir) / "remote"
+            cache_dir = Path(tmp_dir) / "cache"
+            remote_dir.mkdir()
+            info_path = remote_dir / "info.2026-06-03.32.log.gz"
+            error_path = remote_dir / "error.2026-06-03.0.log.gz"
+            with gzip.open(info_path, "wt", encoding="utf-8") as handle:
+                handle.write("2026-06-03 10:00:02 info line\n")
+            with gzip.open(error_path, "wt", encoding="utf-8") as handle:
+                handle.write("2026-06-03 10:00:01 error start\nstack line\n")
+            files = (
+                HistoryLogFile("2026-06-03", info_path.name, str(info_path), info_path.stat().st_size),
+                HistoryLogFile("2026-06-03", error_path.name, str(error_path), error_path.stat().st_size),
+            )
+            source = LogSource(
+                "history_remote:test",
+                "历史日志 | 2026-06-03",
+                "\n".join(file.remote_path for file in files),
+                "history_remote",
+                files,
+                str(remote_dir),
+            )
+            worker = LogFetchWorker(
+                DeploymentProfile(id="p1", name="demo", host="127.0.0.1", target_path="/srv/app"),
+                source,
+            )
+            worker._history_cache = lambda: HistoryLogCache(cache_dir, "p1", "demo", str(remote_dir))  # type: ignore[method-assign]
+
+            result = worker._download_history_logs(FakeDeployer(), source)
+
+            self.assertEqual(
+                result.text.splitlines(),
+                [
+                    "[history:error.0] 2026-06-03 10:00:01 error start",
+                    "stack line",
+                    "[history:info.32] 2026-06-03 10:00:02 info line",
+                ],
+            )
+            self.assertEqual(Path(result.local_path).name, "selected-history.log")
+
+    def test_log_fetch_worker_reuses_cached_history_archive_when_size_matches(self) -> None:
+        class FailingDeployer:
+            @staticmethod
+            def download_remote_file(_remote_path: str, _local_path: str) -> int:
+                raise AssertionError("不应重复下载已缓存的历史日志")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache = HistoryLogCache(Path(tmp_dir), "p1", "demo", "/srv/app/logs/history")
+            history_file = HistoryLogFile(
+                "2026-06-03",
+                "info.2026-06-03.32.log.gz",
+                "/srv/app/logs/history/2026-06-03/info.2026-06-03.32.log.gz",
+                0,
+            )
+            archive_path = cache.archive_path(history_file)
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            with gzip.open(archive_path, "wt", encoding="utf-8") as handle:
+                handle.write("2026-06-03 10:00:02 cached info\n")
+            history_file = HistoryLogFile(
+                history_file.date,
+                history_file.name,
+                history_file.remote_path,
+                archive_path.stat().st_size,
+            )
+            source = LogSource(
+                "history_remote:test",
+                "历史日志 | 2026-06-03",
+                history_file.remote_path,
+                "history_remote",
+                (history_file,),
+                "/srv/app/logs/history",
+            )
+            worker = LogFetchWorker(
+                DeploymentProfile(id="p1", name="demo", host="127.0.0.1", target_path="/srv/app"),
+                source,
+            )
+            worker._history_cache = lambda: cache  # type: ignore[method-assign]
+
+            result = worker._download_history_logs(FailingDeployer(), source)
+
+            self.assertIn("[history:info.32] 2026-06-03 10:00:02 cached info", result.text)
 
     def test_log_viewer_fetch_done_updates_loaded_path_and_status(self) -> None:
         dialog = LogViewerDialog(

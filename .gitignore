@@ -12,6 +12,7 @@ env/
 # PyInstaller build artifacts
 build/
 dist/
+history-log-cache/
 
 # IDE
 .idea/

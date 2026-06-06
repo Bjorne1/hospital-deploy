@@ -5,6 +5,7 @@ import json
 import os
 import posixpath
 import shlex
+import stat
 import tarfile
 import tempfile
 from dataclasses import dataclass
@@ -41,6 +42,15 @@ class DeployResult:
     backup_record: BackupRecord | None
     deleted_backups: list[BackupRecord]
     deployed_target_path: str
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteFileEntry:
+    name: str
+    path: str
+    size: int
+    modified_at: datetime | None
+    is_dir: bool
 
 
 class RemoteDeployer:
@@ -387,6 +397,23 @@ class RemoteDeployer:
         local_file.parent.mkdir(parents=True, exist_ok=True)
         self.sftp.get(remote_path, str(local_file))
         return size
+
+    def list_remote_dir(self, remote_path: str) -> list[RemoteFileEntry]:
+        assert self.sftp is not None
+        entries: list[RemoteFileEntry] = []
+        for item in self.sftp.listdir_attr(remote_path):
+            mode = item.st_mode or 0
+            modified_at = datetime.fromtimestamp(item.st_mtime) if item.st_mtime else None
+            entries.append(
+                RemoteFileEntry(
+                    name=item.filename,
+                    path=posixpath.join(remote_path.rstrip("/"), item.filename),
+                    size=item.st_size or 0,
+                    modified_at=modified_at,
+                    is_dir=stat.S_ISDIR(mode),
+                )
+            )
+        return entries
 
     def path_exists(self, remote_path: str) -> bool:
         assert self.sftp is not None
