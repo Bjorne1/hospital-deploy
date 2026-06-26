@@ -12,11 +12,13 @@ from PySide2.QtWidgets import QApplication
 from hospital_deploy_tool.constants import PROFILE_KIND_UNSET
 from hospital_deploy_tool.log_history import HistoryLogCache, HistoryLogFile
 from hospital_deploy_tool.log_tools import (
+    BINARY_MEDICAL_RECORD_PLACEHOLDER,
     filter_log_lines,
     group_line_events,
     parse_line_timestamp,
     read_local_tail,
     read_local_text,
+    replace_binary_medical_records,
     resolve_time_range,
 )
 from hospital_deploy_tool.models import DeploymentProfile
@@ -157,6 +159,28 @@ class LogToolsTests(unittest.TestCase):
             path = Path(tmp_dir) / "demo.log"
             path.write_text("a\nb\nc\n", encoding="utf-8")
             self.assertEqual(read_local_text(str(path)), "a\nb\nc\n")
+
+    def test_replace_binary_medical_records_keeps_short_snote_titles(self) -> None:
+        text = '"snote":"入院记录","stitle":"入院记录"'
+        self.assertEqual(replace_binary_medical_records(text), text)
+
+    def test_replace_binary_medical_records_replaces_xtextdocument_field(self) -> None:
+        text = (
+            '2026-06-26 INFO {"content":"<XTextDocument><XElements>large record</XElements></XTextDocument>",'
+            '"other":"keep"}'
+        )
+        result = replace_binary_medical_records(text)
+        self.assertIn(f'"content":"{BINARY_MEDICAL_RECORD_PLACEHOLDER}"', result)
+        self.assertIn('"other":"keep"', result)
+        self.assertNotIn("<XTextDocument", result)
+
+    def test_replace_binary_medical_records_replaces_multiline_snote_value(self) -> None:
+        text = '2026-06-26 INFO {"snote":"<XTextDocument>line1\nline2</XTextDocument>","scode":"1"}'
+        result = replace_binary_medical_records(text)
+        self.assertEqual(
+            result,
+            f'2026-06-26 INFO {{"snote":"{BINARY_MEDICAL_RECORD_PLACEHOLDER}","scode":"1"}}',
+        )
 
     def test_group_line_events_keeps_multiline_block(self) -> None:
         lines = [
@@ -421,6 +445,25 @@ class LogToolsTests(unittest.TestCase):
 
             dialog._unescape_newline_check.setChecked(False)
             self.assertIn("SELECT 1\\nFROM dual", dialog._display_text)
+        finally:
+            dialog.close()
+
+    def test_log_viewer_replaces_binary_medical_records_by_default(self) -> None:
+        dialog = LogViewerDialog(
+            profile=DeploymentProfile(name="demo", host="127.0.0.1", target_path="/srv/app"),
+            history=[],
+        )
+        try:
+            dialog._raw_lines = [
+                '2026-06-26 11:29:48 INFO {"snote":"<XTextDocument><XElements>large record</XElements></XTextDocument>"}'
+            ]
+
+            dialog._apply_filters()
+            self.assertIn(BINARY_MEDICAL_RECORD_PLACEHOLDER, dialog._display_text)
+            self.assertNotIn("<XTextDocument", dialog._display_text)
+
+            dialog._replace_medical_record_check.setChecked(False)
+            self.assertIn("<XTextDocument", dialog._display_text)
         finally:
             dialog.close()
 

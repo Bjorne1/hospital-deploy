@@ -37,7 +37,14 @@ from ..log_history import (
     history_log_label,
     read_history_log_text,
 )
-from ..log_tools import FilteredLogResult, filter_log_lines, group_line_events, read_local_text, resolve_time_range
+from ..log_tools import (
+    FilteredLogResult,
+    filter_log_lines,
+    group_line_events,
+    read_local_text,
+    replace_binary_medical_records,
+    resolve_time_range,
+)
 from ..models import DeploymentProfile, HistoryRecord
 from .log_aux_dialogs import HistoryLogBrowserDialog, LogPathConfigDialog
 
@@ -408,6 +415,9 @@ class LogViewerDialog(QDialog):
         self._unescape_newline_check = QCheckBox("还原转义换行", self)
         self._unescape_newline_check.setChecked(True)
         self._unescape_newline_check.setToolTip("将日志中的 \\r\\n 与 \\n 显示为真实换行，便于查看多行 SQL")
+        self._replace_medical_record_check = QCheckBox("替换二进制病历", self)
+        self._replace_medical_record_check.setChecked(True)
+        self._replace_medical_record_check.setToolTip("将 snote 等字段中的二进制病历内容显示为占位符")
         row.addWidget(QLabel("筛选", self))
         row.addWidget(self._include_edit, 2)
         row.addWidget(self._exclude_edit, 2)
@@ -416,12 +426,14 @@ class LogViewerDialog(QDialog):
         row.addWidget(QLabel("上下文", self))
         row.addWidget(self._context_spin)
         row.addWidget(self._unescape_newline_check)
+        row.addWidget(self._replace_medical_record_check)
         self._include_edit.textChanged.connect(self._apply_filters)
         self._exclude_edit.textChanged.connect(self._apply_filters)
         self._trace_id_edit.textChanged.connect(self._apply_filters)
         self._case_check.toggled.connect(self._apply_filters)
         self._context_spin.valueChanged.connect(self._apply_filters)
         self._unescape_newline_check.toggled.connect(self._apply_filters)
+        self._replace_medical_record_check.toggled.connect(self._apply_filters)
         return row
 
     def _build_time_bar(self) -> QHBoxLayout:
@@ -724,7 +736,7 @@ class LogViewerDialog(QDialog):
             end_time=end_time,
             context_lines=self._context_spin.value(),
         )
-        self._display_text = "\n".join(self._prepare_display_lines(self._last_result.lines))
+        self._display_text = self._prepare_display_text(self._last_result.lines)
         self._log_area.setPlainText(self._display_text)
         self._update_status(start_time, end_time)
 
@@ -762,10 +774,13 @@ class LogViewerDialog(QDialog):
         self._status_label.setText(" | ".join(parts))
         self._jump_to_latest()
 
-    def _prepare_display_lines(self, lines: list[str]) -> list[str]:
-        if not self._unescape_newline_check.isChecked():
-            return lines
-        return [self._restore_escaped_line_breaks(line) for line in lines]
+    def _prepare_display_text(self, lines: list[str]) -> str:
+        text = "\n".join(lines)
+        if self._replace_medical_record_check.isChecked():
+            text = replace_binary_medical_records(text)
+        if self._unescape_newline_check.isChecked():
+            text = self._restore_escaped_line_breaks(text)
+        return text
 
     @staticmethod
     def _restore_escaped_line_breaks(line: str) -> str:

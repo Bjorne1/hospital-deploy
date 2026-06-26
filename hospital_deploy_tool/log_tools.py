@@ -11,6 +11,21 @@ _SHORT_TIMESTAMP_RE = re.compile(r"(\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 _EVENT_START_TIMESTAMP_RE = re.compile(
     r"^\s*(?:\[[^\]]+\]\s+)?(?:\[?\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?|\[?\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[.,]\d+)?)"
 )
+_JSON_STRING_FIELD_RE = re.compile(
+    r'(?P<prefix>"(?P<key>[^"\\]+)"\s*:\s*")(?P<value>(?:\\.|[^"\\])*)(?P<suffix>")',
+    re.DOTALL,
+)
+_BINARY_MEDICAL_RECORD_MARKERS = (
+    "<XTextDocument",
+    "\\u003cXTextDocument",
+    "\\u003CXTextDocument",
+    "<XElements",
+    "ImageDataBase64String",
+    "DocumentContentVersion",
+    "DCSoft.Writer",
+)
+_LARGE_SNOTE_VALUE_LENGTH = 512
+BINARY_MEDICAL_RECORD_PLACEHOLDER = "【二进制病历】"
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +59,23 @@ def read_local_tail(path: str, lines: int) -> str:
     return "".join(tail_lines)
 
 
+def replace_binary_medical_records(
+    text: str,
+    placeholder: str = BINARY_MEDICAL_RECORD_PLACEHOLDER,
+) -> str:
+    if not text:
+        return text
+
+    def replace_match(match: re.Match[str]) -> str:
+        key = match.group("key")
+        value = match.group("value")
+        if _is_binary_medical_record_field(key, value):
+            return f"{match.group('prefix')}{placeholder}{match.group('suffix')}"
+        return match.group(0)
+
+    return _JSON_STRING_FIELD_RE.sub(replace_match, text)
+
+
 def parse_line_timestamp(line: str, now: datetime | None = None) -> datetime | None:
     current = now or datetime.now()
     match = _FULL_TIMESTAMP_RE.search(line)
@@ -62,6 +94,12 @@ def parse_line_timestamp(line: str, now: datetime | None = None) -> datetime | N
     except ValueError:
         return None
     return short_value.replace(year=current.year)
+
+
+def _is_binary_medical_record_field(key: str, value: str) -> bool:
+    if any(marker in value for marker in _BINARY_MEDICAL_RECORD_MARKERS):
+        return True
+    return key == "snote" and len(value) >= _LARGE_SNOTE_VALUE_LENGTH
 
 
 def resolve_time_range(
