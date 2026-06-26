@@ -374,6 +374,7 @@ class LogViewerDialog(QDialog):
         layout.addLayout(self._build_action_bar())
         self._log_area = QPlainTextEdit(self)
         self._log_area.setReadOnly(True)
+        self._log_area.setLineWrapMode(QPlainTextEdit.NoWrap)
         font = QFont("Consolas", 11)
         font.setStyleHint(QFont.Monospace)
         self._log_area.setFont(font)
@@ -478,6 +479,10 @@ class LogViewerDialog(QDialog):
         self._history_button = QPushButton("历史日志", self)
         self._history_button.setProperty("role", "secondary")
         self._history_button.clicked.connect(self._open_history_logs)
+        self._wrap_button = QPushButton("自动换行", self)
+        self._wrap_button.setCheckable(True)
+        self._wrap_button.setProperty("role", "muted")
+        self._wrap_button.toggled.connect(self._toggle_wrap)
         self._config_button = QPushButton("配置路径", self)
         self._config_button.setProperty("role", "muted")
         self._config_button.clicked.connect(self._open_config)
@@ -487,6 +492,7 @@ class LogViewerDialog(QDialog):
         row.addWidget(self._copy_button)
         row.addWidget(self._export_button)
         row.addWidget(self._history_button)
+        row.addWidget(self._wrap_button)
         row.addStretch(1)
         row.addWidget(self._config_button)
         row.addWidget(self._close_button)
@@ -801,6 +807,12 @@ class LogViewerDialog(QDialog):
             self._last_result = FilteredLogResult([], 0, 0, 0, 0)
             self._display_text = message
             self._log_area.setPlainText(self._display_text)
+
+    def _toggle_wrap(self, checked: bool) -> None:
+        if checked:
+            self._log_area.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        else:
+            self._log_area.setLineWrapMode(QPlainTextEdit.NoWrap)
 
     def _jump_to_latest(self) -> None:
         cursor = self._log_area.textCursor()
