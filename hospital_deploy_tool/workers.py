@@ -49,7 +49,7 @@ class OperationWorker(QObject):
 
     def run(self) -> None:
         try:
-            self.status_changed.emit(self.status_label())
+            self.emit_status(self.status_label())
             self.logger.info(f"开始执行操作: {self.action}")
             self.validate_inputs()
             payload = self.execute()
@@ -61,7 +61,12 @@ class OperationWorker(QObject):
             self.finished.emit(False, payload)
 
     def execute(self) -> dict[str, object]:
-        with RemoteDeployer(self.profile, self.logger) as deployer:
+        self.emit_status("连接测试中" if self.action == ACTION_TEST_CONNECTION else "连接中")
+        with RemoteDeployer(
+            self.profile,
+            self.logger,
+            status_callback=self.emit_status,
+        ) as deployer:
             if self.action == ACTION_TEST_CONNECTION:
                 deployer.test_connection()
                 return {"backup_record": None, "deleted_backups": []}
@@ -202,13 +207,16 @@ class OperationWorker(QObject):
 
     def status_label(self) -> str:
         mapping = {
-            ACTION_DEPLOY: "部署中",
-            ACTION_UPLOAD_ONLY: "上传中",
-            ACTION_COMMANDS_ONLY: "执行命令中",
+            ACTION_DEPLOY: "准备中",
+            ACTION_UPLOAD_ONLY: "准备中",
+            ACTION_COMMANDS_ONLY: "准备中",
             ACTION_TEST_CONNECTION: "连接测试中",
-            ACTION_RESTORE_BACKUP: "恢复备份中",
+            ACTION_RESTORE_BACKUP: "准备中",
         }
         return mapping[self.action]
+
+    def emit_status(self, text: str) -> None:
+        self.status_changed.emit(text)
 
     def forward_log(self, level: str, line: str) -> None:
         self.log_emitted.emit(level, line)

@@ -27,6 +27,7 @@ from .targeting import resolve_file_target
 
 
 ProgressCallback = Callable[[str, int, int, int, int, int, int], None]
+StatusCallback = Callable[[str], None]
 LOCAL_TAR_GZIP_COMPRESSLEVEL = 1
 
 
@@ -54,10 +55,17 @@ class RemoteFileEntry:
 
 
 class RemoteDeployer:
-    def __init__(self, profile: DeploymentProfile, logger, operation_timeout: float | None = None) -> None:
+    def __init__(
+        self,
+        profile: DeploymentProfile,
+        logger,
+        operation_timeout: float | None = None,
+        status_callback: StatusCallback | None = None,
+    ) -> None:
         self.profile = profile
         self.logger = logger
         self.operation_timeout = operation_timeout
+        self.status_callback = status_callback
         self.client = paramiko.SSHClient()
         self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         self.sftp: paramiko.SFTPClient | None = None
@@ -99,11 +107,16 @@ class RemoteDeployer:
         backup = None
         deleted: list[BackupRecord] = []
         if action != ACTION_COMMANDS_ONLY:
+            self.update_status("备份中")
             backup = self.prepare_backup()
+            self.update_status("上传中")
             self.upload_source(progress)
         if action != ACTION_UPLOAD_ONLY:
+            if self.has_post_commands():
+                self.update_status("执行命令中")
             self.run_post_commands()
         if backup:
+            self.update_status("清理旧备份中")
             deleted = self.prune_backups()
         return DeployResult(
             backup_record=backup,
@@ -112,14 +125,23 @@ class RemoteDeployer:
         )
 
     def restore_backup(self, record: BackupRecord, run_post_commands: bool = False) -> None:
+        self.update_status("恢复备份中")
         self.logger.info(f"恢复备份: {record.remote_backup_path}")
         if record.source_type in {SOURCE_TYPE_DIRECTORY, SOURCE_TYPE_ARCHIVE}:
             self.restore_directory(record.remote_backup_path, record.target_path)
         else:
             self.restore_file(record.remote_backup_path, record.target_path)
         if run_post_commands:
+            self.update_status("执行命令中")
             self.run_post_commands()
         self.logger.success("备份恢复完成")
+
+    def update_status(self, text: str) -> None:
+        if self.status_callback is not None:
+            self.status_callback(text)
+
+    def has_post_commands(self) -> bool:
+        return any(command.strip() for command in self.profile.post_commands)
 
     def prepare_backup(self) -> BackupRecord | None:
         if not self.profile.backup_enabled:
